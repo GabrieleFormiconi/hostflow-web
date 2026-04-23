@@ -2689,7 +2689,7 @@ def load_scheduled_messages(utente_id):
                channel, status, message_text, created_at, sent_at, error_message
         FROM scheduled_messages
         WHERE utente_id = ?
-        ORDER BY datetime(send_at) ASC, id ASC
+        ORDER BY send_at ASC, id ASC
     """
     df = pd.read_sql_query(query, conn, params=(utente_id,))
     conn.close()
