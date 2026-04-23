@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+hostflow_auth.db
+settings.xlsx
+.streamlit/
