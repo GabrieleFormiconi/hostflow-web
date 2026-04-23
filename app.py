@@ -16,7 +16,9 @@ from datetime import date, timedelta, datetime
 import pandas as pd
 import streamlit as st
 
-from whatsapp_web_sender import send_whatsapp_message
+# from whatsapp_web_sender import send_whatsapp_message
+def send_whatsapp_message(phone_number, message_text):
+    return True, "Simulato (WhatsApp disattivato)"
 
 try:
     from dotenv import load_dotenv
