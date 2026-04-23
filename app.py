@@ -2853,6 +2853,28 @@ def message_templates(guest_name, check_in, check_out, property_name, checkin_ti
     }
 
 
+
+def format_date_safe(value, fallback="-"):
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return fallback
+        return dt.strftime("%d/%m/%Y")
+    except Exception:
+        return fallback
+
+
+def date_value_safe(value, fallback=None):
+    fallback = fallback or date.today()
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return fallback
+        return dt.date()
+    except Exception:
+        return fallback
+
+
 def render_dashboard_dataframe(df_to_show, user_id):
     all_columns = list(df_to_show.columns)
     saved_settings = carica_sidebar_settings(user_id)
@@ -2980,7 +3002,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.info("Non hai ancora inserito prenotazioni custom.")
         else:
             edit_options = {
-                f'#{int(row["id"])} · {row["guest_name"]} · {pd.to_datetime(row["check_in"]).strftime("%d/%m/%Y")} → {pd.to_datetime(row["check_out"]).strftime("%d/%m/%Y")}': int(row["id"])
+                f'#{int(row["id"])} · {row["guest_name"]} · {format_date_safe(row.get("check_in"))} → {format_date_safe(row.get("check_out"))}': int(row["id"])
                 for _, row in custom_bookings_df.iterrows()
             }
             selected_custom_label = st.selectbox(
@@ -2999,8 +3021,8 @@ def render_dashboard_dataframe(df_to_show, user_id):
                     value=str(selected_custom_row.get("guest_phone", "") or ""),
                     key=f"edit_custom_guest_phone_{selected_custom_id}"
                 )
-                edit_check_in = st.date_input("Check-in", value=pd.to_datetime(selected_custom_row["check_in"]).date(), key=f"edit_custom_check_in_{selected_custom_id}")
-                edit_check_out = st.date_input("Check-out", value=pd.to_datetime(selected_custom_row["check_out"]).date(), key=f"edit_custom_check_out_{selected_custom_id}")
+                edit_check_in = st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
+                edit_check_out = st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
                 edit_guests = st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
             with ec2:
                 edit_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
