@@ -8,6 +8,14 @@ import ssl
 from email.message import EmailMessage
 from io import BytesIO
 import sqlite3
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:
+    psycopg2 = None
+    RealDictCursor = None
+
 import hashlib
 import secrets
 from pathlib import Path
@@ -346,8 +354,19 @@ CAMPI = CONFIG["campi"]
 st.set_page_config(page_title=TESTI.get("titolo_app", "HostFlow"), layout="wide")
 
 DB_PATH = "hostflow_auth.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
 
 SESSION_TIMEOUT_MINUTES = 10
+
+
+class PostgresDictCursor(RealDictCursor if RealDictCursor else object):
+    def execute(self, query, vars=None):
+        # Il codice storico usa i placeholder SQLite "?".
+        # In Postgres/psycopg2 devono diventare "%s".
+        if isinstance(query, str):
+            query = query.replace("?", "%s")
+        return super().execute(query, vars)
 
 
 def compone_indirizzo_ricerca(profilo):
@@ -386,6 +405,11 @@ def render_metriche_configurabili(items, cards_per_row=4):
 
 
 def get_conn():
+    if USE_POSTGRES:
+        if psycopg2 is None:
+            raise RuntimeError("psycopg2 non installato. Aggiungi psycopg2-binary a requirements.txt.")
+        return psycopg2.connect(DATABASE_URL, cursor_factory=PostgresDictCursor)
+
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -562,11 +586,12 @@ def build_cleaning_movements(valid_df):
 
 
 def init_db():
+    id_pk = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS utenti (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
@@ -614,7 +639,7 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS password_reset_codes (
             email TEXT PRIMARY KEY,
             code_hash TEXT NOT NULL,
@@ -623,17 +648,17 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS file_prenotazioni (
             utente_id INTEGER PRIMARY KEY,
             nome_file TEXT,
-            contenuto BLOB,
+            contenuto BYTEA,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (utente_id) REFERENCES utenti(id)
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS sidebar_settings (
             utente_id INTEGER PRIMARY KEY,
             settings_json TEXT,
@@ -642,9 +667,9 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS scheduled_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             utente_id INTEGER NOT NULL,
             booking_ref TEXT,
             platform TEXT,
@@ -665,7 +690,7 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS message_settings (
             utente_id INTEGER PRIMARY KEY,
             settings_json TEXT,
@@ -674,9 +699,9 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS cleaning_services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             utente_id INTEGER NOT NULL,
             service_date TEXT NOT NULL,
             booking_ref TEXT,
@@ -698,9 +723,9 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS custom_bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             utente_id INTEGER NOT NULL,
             platform TEXT DEFAULT 'Custom',
             guest_name TEXT NOT NULL,
@@ -722,12 +747,12 @@ def init_db():
     """)
     try:
         cur.execute("ALTER TABLE custom_bookings ADD COLUMN guest_phone TEXT")
-    except sqlite3.OperationalError:
+    except Exception:
         pass
 
     try:
         cur.execute("ALTER TABLE scheduled_messages ADD COLUMN guest_phone TEXT")
-    except sqlite3.OperationalError:
+    except Exception:
         pass
 
     conn.commit()
