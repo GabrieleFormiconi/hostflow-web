@@ -24,6 +24,8 @@ from datetime import date, timedelta, datetime
 import pandas as pd
 import streamlit as st
 
+USE_POSTGRES = True
+
 
 try:
     from dotenv import load_dotenv
