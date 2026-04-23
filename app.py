@@ -4811,13 +4811,15 @@ if "pulizie_servizi" in tab_map:
             booking_options = []
             for _, row in dashboard_cleaning_source.iterrows():
                 booking_ref_value = booking_reference(row)
-                label = f'{row["guest_name"]} · check-out {pd.to_datetime(row["check_out"]).strftime("%d/%m/%Y")} · check-in {pd.to_datetime(row["check_in"]).strftime("%d/%m/%Y")}'
+                check_out_safe = date_value_safe(row.get("check_out"))
+                check_in_safe = date_value_safe(row.get("check_in"))
+                label = f'{row["guest_name"]} · check-out {format_date_safe(row.get("check_out"))} · check-in {format_date_safe(row.get("check_in"))}'
                 booking_options.append({
                     "booking_ref": booking_ref_value,
                     "label": label,
                     "guest_name": str(row.get("guest_name", "")),
-                    "checkout_date": pd.to_datetime(row.get("check_out")).date(),
-                    "checkin_date": pd.to_datetime(row.get("check_in")).date(),
+                    "checkout_date": check_out_safe,
+                    "checkin_date": check_in_safe,
                 })
 
             selected_booking = None
