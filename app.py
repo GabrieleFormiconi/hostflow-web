@@ -8,6 +8,14 @@ import ssl
 from email.message import EmailMessage
 from io import BytesIO
 import sqlite3
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:
+    psycopg2 = None
+    RealDictCursor = None
+
 import hashlib
 import secrets
 from pathlib import Path
@@ -16,9 +24,6 @@ from datetime import date, timedelta, datetime
 import pandas as pd
 import streamlit as st
 
-# from whatsapp_web_sender import send_whatsapp_message
-def send_whatsapp_message(phone_number, message_text):
-    return True, "Simulato (WhatsApp disattivato)"
 
 try:
     from dotenv import load_dotenv
@@ -349,8 +354,19 @@ CAMPI = CONFIG["campi"]
 st.set_page_config(page_title=TESTI.get("titolo_app", "HostFlow"), layout="wide")
 
 DB_PATH = "hostflow_auth.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
 
 SESSION_TIMEOUT_MINUTES = 10
+
+
+class PostgresDictCursor(RealDictCursor if RealDictCursor else object):
+    def execute(self, query, vars=None):
+        # Il codice storico usa i placeholder SQLite "?".
+        # In Postgres/psycopg2 devono diventare "%s".
+        if isinstance(query, str):
+            query = query.replace("?", "%s")
+        return super().execute(query, vars)
 
 
 def compone_indirizzo_ricerca(profilo):
@@ -389,10 +405,47 @@ def render_metriche_configurabili(items, cards_per_row=4):
 
 
 def get_conn():
+    if USE_POSTGRES:
+        if psycopg2 is None:
+            raise RuntimeError("psycopg2 non installato. Aggiungi psycopg2-binary a requirements.txt.")
+        return psycopg2.connect(DATABASE_URL, cursor_factory=PostgresDictCursor)
+
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
+
+
+
+def hf_date(value):
+    """Converte Timestamp/datetime/date/string in datetime.date per confronti sicuri."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return ts.date()
+    except Exception:
+        return None
+
+
+def hf_date_series(series):
+    """Serie normalizzata a mezzanotte per confronti sicuri con date/timestamp."""
+    return pd.to_datetime(series, errors="coerce").dt.normalize()
+
+
+def hf_bound(value):
+    return pd.Timestamp(value).normalize()
 
 def calculate_hours_worked(start_time_str, end_time_str):
     try:
@@ -455,7 +508,7 @@ def load_cleaning_services(utente_id):
                custom_total_override, total_cost, payment_status, notes, created_at
         FROM cleaning_services
         WHERE utente_id = ?
-        ORDER BY service_date DESC, id DESC
+        ORDER BY date(service_date) DESC, id DESC
     """
     df = pd.read_sql_query(query, conn, params=(int(utente_id),))
     conn.close()
@@ -546,13 +599,13 @@ def build_cleaning_movements(valid_df):
     for _, row in valid_df.iterrows():
         booking_ref_value = booking_reference(row)
         rows.append({
-            "Data": safe_date_label(row.get("check_out")),
+            "Data": pd.to_datetime(row["check_out"]).strftime("%d/%m/%Y"),
             "Movimento": "Check-out",
             "Ospite": str(row.get("guest_name", "")),
             "Booking ref": booking_ref_value,
         })
         rows.append({
-            "Data": safe_date_label(row.get("check_in")),
+            "Data": pd.to_datetime(row["check_in"]).strftime("%d/%m/%Y"),
             "Movimento": "Check-in",
             "Ospite": str(row.get("guest_name", "")),
             "Booking ref": booking_ref_value,
@@ -565,11 +618,12 @@ def build_cleaning_movements(valid_df):
 
 
 def init_db():
+    id_pk = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS utenti (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
@@ -617,7 +671,7 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS password_reset_codes (
             email TEXT PRIMARY KEY,
             code_hash TEXT NOT NULL,
@@ -626,17 +680,17 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS file_prenotazioni (
             utente_id INTEGER PRIMARY KEY,
             nome_file TEXT,
-            contenuto BLOB,
+            contenuto BYTEA,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (utente_id) REFERENCES utenti(id)
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS sidebar_settings (
             utente_id INTEGER PRIMARY KEY,
             settings_json TEXT,
@@ -645,9 +699,9 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS scheduled_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             utente_id INTEGER NOT NULL,
             booking_ref TEXT,
             platform TEXT,
@@ -668,7 +722,7 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS message_settings (
             utente_id INTEGER PRIMARY KEY,
             settings_json TEXT,
@@ -677,9 +731,9 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS cleaning_services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             utente_id INTEGER NOT NULL,
             service_date TEXT NOT NULL,
             booking_ref TEXT,
@@ -701,9 +755,9 @@ def init_db():
         )
     """)
 
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS custom_bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_pk},
             utente_id INTEGER NOT NULL,
             platform TEXT DEFAULT 'Custom',
             guest_name TEXT NOT NULL,
@@ -725,12 +779,12 @@ def init_db():
     """)
     try:
         cur.execute("ALTER TABLE custom_bookings ADD COLUMN guest_phone TEXT")
-    except sqlite3.OperationalError:
+    except Exception:
         pass
 
     try:
         cur.execute("ALTER TABLE scheduled_messages ADD COLUMN guest_phone TEXT")
-    except sqlite3.OperationalError:
+    except Exception:
         pass
 
     conn.commit()
@@ -750,12 +804,8 @@ def crea_utente(email, password):
         cur.execute("INSERT INTO utenti (email, password_hash, salt) VALUES (?, ?, ?)", (email.strip().lower(), password_hash, salt))
         conn.commit()
         return True, None
-    except Exception as exc:
-        conn.rollback()
-        err = str(exc).lower()
-        if isinstance(exc, sqlite3.IntegrityError) or "duplicate" in err or "unique" in err:
-            return False, TESTI["errore_email_esistente"]
-        return False, f"Errore creazione account: {exc}"
+    except sqlite3.IntegrityError:
+        return False, TESTI["errore_email_esistente"]
     finally:
         conn.close()
 
@@ -1321,12 +1371,6 @@ def delete_custom_booking(utente_id, booking_id):
 
 
 def load_custom_bookings(utente_id):
-    # Pulizia automatica di eventuali righe corrotte create durante i test/migrazione.
-    try:
-        delete_invalid_custom_bookings_for_user(utente_id)
-    except Exception:
-        pass
-
     conn = get_conn()
     query = """
         SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
@@ -1334,7 +1378,7 @@ def load_custom_bookings(utente_id):
                raw_booking_status, status, guests, notes
         FROM custom_bookings
         WHERE utente_id = ?
-        ORDER BY check_in ASC, id ASC
+        ORDER BY date(check_in) ASC, id ASC
     """
     df = pd.read_sql_query(query, conn, params=(int(utente_id),))
     conn.close()
@@ -1342,44 +1386,42 @@ def load_custom_bookings(utente_id):
     if df.empty:
         return df
 
-    df = df.copy()
-    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce")
-    df["guest_name"] = df.get("guest_name", "").fillna("").astype(str).str.strip()
-    df["guest_phone"] = df.get("guest_phone", "").fillna("").astype(str).str.strip()
-
-    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
-    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
-
-    valid_mask = (
-        df["id"].notna()
-        & (df["id"] > 0)
-        & df["guest_name"].ne("")
-        & ~df["guest_name"].str.lower().isin(["guest_name", "nome ospite"])
-        & check_in_dt.notna()
-        & check_out_dt.notna()
-        & (check_out_dt > check_in_dt)
-    )
-
-    df = df[valid_mask].copy()
-    check_in_dt = check_in_dt[valid_mask]
-    check_out_dt = check_out_dt[valid_mask]
-
-    if df.empty:
-        return df
-
-    df["check_in"] = check_in_dt.dt.date
-    df["check_out"] = check_out_dt.dt.date
-
-    for col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
-        df[col] = pd.to_numeric(df.get(col, 0), errors="coerce").fillna(0)
-
+    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
+    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
+    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     df["id"] = df["id"].astype(int)
     df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df.get("status", "confirmed").fillna("confirmed").astype(str).apply(normalize_status)
+    df["status"] = df["status"].apply(normalize_status)
     if "raw_booking_status" not in df.columns:
         df["raw_booking_status"] = df["status"]
-    df["platform"] = df.get("platform", "Custom").fillna("Custom").astype(str).replace("", "Custom")
-    df["notes"] = df.get("notes", "").fillna("").astype(str)
+    if "guest_phone" not in df.columns:
+        df["guest_phone"] = ""
+    df["guest_phone"] = df["guest_phone"].fillna("").astype(str)
+    return df
+
+    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
+    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
+    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["id"] = df["id"].astype(int)
+    df["guests"] = df["guests"].astype(int).clip(lower=1)
+    df["status"] = df["status"].apply(normalize_status)
+    if "raw_booking_status" not in df.columns:
+        df["raw_booking_status"] = df["status"]
+    if "guest_phone" not in df.columns:
+        df["guest_phone"] = ""
+    return df
+
+    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
+    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
+    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["id"] = df["id"].astype(int)
+    df["guests"] = df["guests"].astype(int).clip(lower=1)
+    df["status"] = df["status"].apply(normalize_status)
+    if "raw_booking_status" not in df.columns:
+        df["raw_booking_status"] = df["status"]
     return df
 
 
@@ -1915,8 +1957,8 @@ def month_slice(df, year, month):
     next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
     active = df[
         (df["status"].str.lower() != "cancelled")
-        & (pd.to_datetime(df["check_in"]).dt.date < next_month)
-        & (pd.to_datetime(df["check_out"]).dt.date >= month_start)
+        & (hf_date_series(df["check_in"]) < hf_bound(next_month))
+        & (hf_date_series(df["check_out"]) >= hf_bound(month_start))
     ].copy()
     return active, month_start, next_month
 
@@ -1927,8 +1969,12 @@ def month_stats(df, year, month):
 
     occupied_dates = set()
     for _, row in active.iterrows():
-        start = max(row["check_in"], month_start)
-        end = min(row["check_out"], next_month)
+        row_check_in = hf_date(row["check_in"])
+        row_check_out = hf_date(row["check_out"])
+        if row_check_in is None or row_check_out is None:
+            continue
+        start = max(row_check_in, month_start)
+        end = min(row_check_out, next_month)
         for d in pd.date_range(start, end - timedelta(days=1), freq="D"):
             occupied_dates.add(d.date())
 
@@ -2018,15 +2064,19 @@ def get_period_bounds(year, period_mode="Mensile", month=1, quarter=1, semester=
 def period_stats(df, start_date, end_date):
     active = df[
         (df["status"].str.lower() != "cancelled")
-        & (pd.to_datetime(df["check_in"]).dt.date < end_date)
-        & (pd.to_datetime(df["check_out"]).dt.date >= start_date)
+        & (hf_date_series(df["check_in"]) < hf_bound(end_date))
+        & (hf_date_series(df["check_out"]) >= hf_bound(start_date))
     ].copy()
 
     days_in_period = (end_date - start_date).days
     occupied_dates = set()
     for _, row in active.iterrows():
-        start = max(row["check_in"], start_date)
-        end = min(row["check_out"], end_date)
+        row_check_in = hf_date(row["check_in"])
+        row_check_out = hf_date(row["check_out"])
+        if row_check_in is None or row_check_out is None:
+            continue
+        start = max(row_check_in, start_date)
+        end = min(row_check_out, end_date)
         for d in pd.date_range(start, end - timedelta(days=1), freq="D"):
             occupied_dates.add(d.date())
 
@@ -2034,8 +2084,8 @@ def period_stats(df, start_date, end_date):
     occupancy = round((occupied_nights / days_in_period) * 100, 1) if days_in_period else 0
 
     arrivals = active[
-        (pd.to_datetime(active["check_in"]).dt.date >= start_date)
-        & (pd.to_datetime(active["check_in"]).dt.date < end_date)
+        (hf_date_series(active["check_in"]) >= hf_bound(start_date))
+        & (hf_date_series(active["check_in"]) < hf_bound(end_date))
     ].copy()
     total_bookings = len(arrivals)
 
@@ -2052,8 +2102,8 @@ def period_stats(df, start_date, end_date):
 
 def filter_df_by_period(df, start_date, end_date):
     return df[
-        (pd.to_datetime(df["check_in"]).dt.date >= start_date)
-        & (pd.to_datetime(df["check_in"]).dt.date < end_date)
+        (hf_date_series(df["check_in"]) >= hf_bound(start_date))
+        & (hf_date_series(df["check_in"]) < hf_bound(end_date))
     ].copy()
 
 
@@ -2174,8 +2224,8 @@ def get_period_bounds(period_mode, year, month=1, quarter=1, semester=1, custom_
 def period_slice(df, start_date, end_date):
     active = df[
         (df["status"].str.lower() != "cancelled")
-        & (pd.to_datetime(df["check_in"]).dt.date < end_date)
-        & (pd.to_datetime(df["check_out"]).dt.date >= start_date)
+        & (hf_date_series(df["check_in"]) < hf_bound(end_date))
+        & (hf_date_series(df["check_out"]) >= hf_bound(start_date))
     ].copy()
     return active
 
@@ -2186,8 +2236,12 @@ def period_stats(df, start_date, end_date):
 
     occupied_dates = set()
     for _, row in active.iterrows():
-        row_start = max(row["check_in"], start_date)
-        row_end = min(row["check_out"], end_date)
+        row_check_in = hf_date(row["check_in"])
+        row_check_out = hf_date(row["check_out"])
+        if row_check_in is None or row_check_out is None:
+            continue
+        row_start = max(row_check_in, start_date)
+        row_end = min(row_check_out, end_date)
         if row_end <= row_start:
             continue
         for d in pd.date_range(row_start, row_end - timedelta(days=1), freq="D"):
@@ -2197,8 +2251,8 @@ def period_stats(df, start_date, end_date):
     occupancy = round((occupied_nights / days_in_period) * 100, 1) if days_in_period else 0
 
     period_res = active[
-        (pd.to_datetime(active["check_in"]).dt.date >= start_date)
-        & (pd.to_datetime(active["check_in"]).dt.date < end_date)
+        (hf_date_series(active["check_in"]) >= hf_bound(start_date))
+        & (hf_date_series(active["check_in"]) < hf_bound(end_date))
     ].copy()
     total_bookings = len(period_res)
 
@@ -2799,6 +2853,28 @@ def message_templates(guest_name, check_in, check_out, property_name, checkin_ti
     }
 
 
+
+def format_date_safe(value, fallback="-"):
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return fallback
+        return dt.strftime("%d/%m/%Y")
+    except Exception:
+        return fallback
+
+
+def date_value_safe(value, fallback=None):
+    fallback = fallback or date.today()
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return fallback
+        return dt.date()
+    except Exception:
+        return fallback
+
+
 def render_dashboard_dataframe(df_to_show, user_id):
     all_columns = list(df_to_show.columns)
     saved_settings = carica_sidebar_settings(user_id)
@@ -2925,11 +3001,10 @@ def render_dashboard_dataframe(df_to_show, user_id):
         if custom_bookings_df.empty:
             st.info("Non hai ancora inserito prenotazioni custom.")
         else:
-            edit_options = {}
-            for _, row in custom_bookings_df.iterrows():
-                check_in_label = safe_date_label(row.get("check_in"))
-                check_out_label = safe_date_label(row.get("check_out"))
-                edit_options[f'#{int(row["id"])} · {row["guest_name"]} · {check_in_label} → {check_out_label}'] = int(row["id"])
+            edit_options = {
+                f'#{int(row["id"])} · {row["guest_name"]} · {format_date_safe(row.get("check_in"))} → {format_date_safe(row.get("check_out"))}': int(row["id"])
+                for _, row in custom_bookings_df.iterrows()
+            }
             selected_custom_label = st.selectbox(
                 "Seleziona prenotazione custom da modificare",
                 options=list(edit_options.keys()),
@@ -2946,8 +3021,8 @@ def render_dashboard_dataframe(df_to_show, user_id):
                     value=str(selected_custom_row.get("guest_phone", "") or ""),
                     key=f"edit_custom_guest_phone_{selected_custom_id}"
                 )
-                edit_check_in = st.date_input("Check-in", value=pd.to_datetime(selected_custom_row["check_in"]).date(), key=f"edit_custom_check_in_{selected_custom_id}")
-                edit_check_out = st.date_input("Check-out", value=pd.to_datetime(selected_custom_row["check_out"]).date(), key=f"edit_custom_check_out_{selected_custom_id}")
+                edit_check_in = st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
+                edit_check_out = st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
                 edit_guests = st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
             with ec2:
                 edit_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
@@ -4493,135 +4568,167 @@ if "messaggi" in tab_map:
                                 if current_msg.get("error_message"):
                                     st.error(f"Errore ultimo invio: {current_msg['error_message']}")
 
+
                                 status_value = str(current_msg.get("status", "pending"))
+
+
                                 if status_value == "failed":
-                                    action1, action2, action3 = st.columns(3)
+
+
+                                    action1, action2 = st.columns(2)
+
+
                                     with action1:
-                                        if st.button("Invia WhatsApp ora", use_container_width=True, key=f"send_now_{selected_id}"):
-                                            phone_number = resolve_message_guest_phone(current_msg, df)
-                                            message_text = str(current_msg.get("message_text", "") or "").strip()
-                                            success, result = send_whatsapp_message(phone_number, message_text)
-                                            if success:
-                                                update_scheduled_message_status(
-                                                    selected_id,
-                                                    st.session_state.utente["id"],
-                                                    "sent",
-                                                    error_message=None,
-                                                    set_sent_now=True,
-                                                )
-                                                st.success("Messaggio WhatsApp inviato correttamente.")
-                                                st.rerun()
-                                            else:
-                                                update_scheduled_message_status(
-                                                    selected_id,
-                                                    st.session_state.utente["id"],
-                                                    "failed",
-                                                    error_message=str(result),
-                                                    set_sent_now=False,
-                                                )
-                                                st.error(f"Errore invio WhatsApp: {result}")
-                                    with action2:
+
+
                                         if st.button("Ripristina", use_container_width=True, key=f"retry_msg_{selected_id}"):
+
+
                                             ok = update_scheduled_message_status(
+
+
                                                 selected_id,
+
+
                                                 st.session_state.utente["id"],
+
+
                                                 "pending",
+
+
                                                 error_message=None,
+
+
                                                 set_sent_now=False,
+
+
                                             )
+
+
                                             if ok:
+
+
                                                 st.success("Messaggio rimesso in attesa di invio.")
+
+
                                                 st.rerun()
-                                    with action3:
+
+
+                                    with action2:
+
+
                                         if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
+
+
                                             ok = update_scheduled_message_status(
+
+
                                                 selected_id,
+
+
                                                 st.session_state.utente["id"],
+
+
                                                 "cancelled",
+
+
                                                 error_message=None,
+
+
                                                 set_sent_now=False,
+
+
                                             )
+
+
                                             if ok:
+
+
                                                 st.info("Messaggio annullato.")
+
+
                                                 st.rerun()
+
+
                                 elif status_value == "cancelled":
-                                    action1, action2 = st.columns(2)
-                                    with action1:
-                                        if st.button("Ripristina", use_container_width=True, key=f"restore_msg_{selected_id}"):
-                                            ok = update_scheduled_message_status(
-                                                selected_id,
-                                                st.session_state.utente["id"],
-                                                "pending",
-                                                error_message=None,
-                                                set_sent_now=False,
-                                            )
-                                            if ok:
-                                                st.success("Messaggio ripristinato.")
-                                                st.rerun()
-                                    with action2:
-                                        if st.button("Invia WhatsApp ora", use_container_width=True, key=f"send_cancelled_now_{selected_id}"):
-                                            phone_number = resolve_message_guest_phone(current_msg, df)
-                                            message_text = str(current_msg.get("message_text", "") or "").strip()
-                                            success, result = send_whatsapp_message(phone_number, message_text)
-                                            if success:
-                                                update_scheduled_message_status(
-                                                    selected_id,
-                                                    st.session_state.utente["id"],
-                                                    "sent",
-                                                    error_message=None,
-                                                    set_sent_now=True,
-                                                )
-                                                st.success("Messaggio WhatsApp inviato correttamente.")
-                                                st.rerun()
-                                            else:
-                                                update_scheduled_message_status(
-                                                    selected_id,
-                                                    st.session_state.utente["id"],
-                                                    "failed",
-                                                    error_message=str(result),
-                                                    set_sent_now=False,
-                                                )
-                                                st.error(f"Errore invio WhatsApp: {result}")
+
+
+                                    if st.button("Ripristina", use_container_width=True, key=f"restore_msg_{selected_id}"):
+
+
+                                        ok = update_scheduled_message_status(
+
+
+                                            selected_id,
+
+
+                                            st.session_state.utente["id"],
+
+
+                                            "pending",
+
+
+                                            error_message=None,
+
+
+                                            set_sent_now=False,
+
+
+                                        )
+
+
+                                        if ok:
+
+
+                                            st.success("Messaggio ripristinato.")
+
+
+                                            st.rerun()
+
+
                                 elif status_value == "sent":
+
+
                                     st.success("Questo messaggio risulta già inviato. Se vuoi rivedere quelli vecchi puoi lasciare attivo 'Mostra storico'.")
+
+
                                 else:
-                                    action1, action2 = st.columns(2)
-                                    with action1:
-                                        if st.button("Invia WhatsApp ora", use_container_width=True, key=f"send_now_{selected_id}"):
-                                            phone_number = resolve_message_guest_phone(current_msg, df)
-                                            message_text = str(current_msg.get("message_text", "") or "").strip()
-                                            success, result = send_whatsapp_message(phone_number, message_text)
-                                            if success:
-                                                update_scheduled_message_status(
-                                                    selected_id,
-                                                    st.session_state.utente["id"],
-                                                    "sent",
-                                                    error_message=None,
-                                                    set_sent_now=True,
-                                                )
-                                                st.success("Messaggio WhatsApp inviato correttamente.")
-                                                st.rerun()
-                                            else:
-                                                update_scheduled_message_status(
-                                                    selected_id,
-                                                    st.session_state.utente["id"],
-                                                    "failed",
-                                                    error_message=str(result),
-                                                    set_sent_now=False,
-                                                )
-                                                st.error(f"Errore invio WhatsApp: {result}")
-                                    with action2:
-                                        if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
-                                            ok = update_scheduled_message_status(
-                                                selected_id,
-                                                st.session_state.utente["id"],
-                                                "cancelled",
-                                                error_message=None,
-                                                set_sent_now=False,
-                                            )
-                                            if ok:
-                                                st.info("Messaggio annullato.")
-                                                st.rerun()
+
+
+                                    st.info("L'invio automatico verrà gestito dal provider WhatsApp integrato online. Da qui puoi solo monitorare o annullare il messaggio.")
+
+
+                                    if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
+
+
+                                        ok = update_scheduled_message_status(
+
+
+                                            selected_id,
+
+
+                                            st.session_state.utente["id"],
+
+
+                                            "cancelled",
+
+
+                                            error_message=None,
+
+
+                                            set_sent_now=False,
+
+
+                                        )
+
+
+                                        if ok:
+
+
+                                            st.info("Messaggio annullato.")
+
+
+                                            st.rerun()
 
 if "pulizie_servizi" in tab_map:
     with tab_map["pulizie_servizi"]:
@@ -4639,8 +4746,8 @@ if "pulizie_servizi" in tab_map:
                 current_period_cleaning = cleaning_df.copy()
                 current_period_cleaning["service_date_dt"] = pd.to_datetime(current_period_cleaning["service_date"], errors="coerce").dt.date
                 current_period_cleaning = current_period_cleaning[
-                    (current_period_cleaning["service_date_dt"] >= period_start) &
-                    (current_period_cleaning["service_date_dt"] < period_end)
+                    (hf_date_series(current_period_cleaning["service_date"]) >= hf_bound(period_start)) &
+                    (hf_date_series(current_period_cleaning["service_date"]) < hf_bound(period_end))
                 ].copy()
 
             k1, k2, k3, k4 = st.columns(4)
@@ -4704,17 +4811,15 @@ if "pulizie_servizi" in tab_map:
             booking_options = []
             for _, row in dashboard_cleaning_source.iterrows():
                 booking_ref_value = booking_reference(row)
-                check_out_dt = pd.to_datetime(row.get("check_out"), errors="coerce")
-                check_in_dt = pd.to_datetime(row.get("check_in"), errors="coerce")
-                if pd.isna(check_out_dt) or pd.isna(check_in_dt):
-                    continue
-                label = f'{row["guest_name"]} · check-out {safe_date_label(row.get("check_out"))} · check-in {safe_date_label(row.get("check_in"))}'
+                check_out_safe = date_value_safe(row.get("check_out"))
+                check_in_safe = date_value_safe(row.get("check_in"))
+                label = f'{row["guest_name"]} · check-out {format_date_safe(row.get("check_out"))} · check-in {format_date_safe(row.get("check_in"))}'
                 booking_options.append({
                     "booking_ref": booking_ref_value,
                     "label": label,
                     "guest_name": str(row.get("guest_name", "")),
-                    "checkout_date": check_out_dt.date(),
-                    "checkin_date": check_in_dt.date(),
+                    "checkout_date": check_out_safe,
+                    "checkin_date": check_in_safe,
                 })
 
             selected_booking = None
