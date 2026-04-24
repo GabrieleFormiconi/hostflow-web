@@ -34,6 +34,10 @@ except Exception:
 from pricing_service import run_pricing_analysis
 
 
+def send_whatsapp_message(phone_number, message_text):
+    return False, "WhatsApp Web disattivato: integrazione Cloud API in preparazione"
+
+
 # ---------------------------
 # Configurazione esterna
 # ---------------------------
@@ -414,6 +418,102 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+
+
+def hf_date(value):
+    """Converte Timestamp/datetime/date/string in datetime.date per confronti sicuri."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return ts.date()
+    except Exception:
+        return None
+
+
+def hf_date_series(series):
+    """Serie di datetime64 normalizzata per confronti sicuri in dashboard/pulizie."""
+    return pd.to_datetime(series, errors="coerce").dt.normalize()
+
+
+def hf_bound(value):
+    """Bound sempre come Timestamp, mai come date Python, per evitare confronti datetime64/date."""
+    if isinstance(value, pd.Timestamp):
+        return value.normalize()
+    if isinstance(value, datetime):
+        return pd.Timestamp(value).normalize()
+    if isinstance(value, date):
+        return pd.Timestamp(value.isoformat()).normalize()
+    return pd.to_datetime(value, errors="coerce").normalize()
+
+
+def hf_filter_between_dates(df, date_col, start_date, end_date):
+    """Filtro periodo robusto: confronta sempre datetime64 con Timestamp."""
+    series = hf_date_series(df[date_col])
+    return (series >= hf_bound(start_date)) & (series < hf_bound(end_date))
+
+
+def ensure_booking_dataframe_columns(df):
+    """Garantisce che il DataFrame abbia sempre le colonne minime usate dalla dashboard."""
+    if df is None:
+        df = pd.DataFrame()
+    df = df.copy()
+
+    defaults = {
+        "platform": "",
+        "guest_name": "",
+        "guest_phone": "",
+        "check_in": pd.NaT,
+        "check_out": pd.NaT,
+        "total_price": 0.0,
+        "cleaning_cost": 0.0,
+        "platform_fee": 0.0,
+        "transaction_cost": 0.0,
+        "raw_booking_status": "confirmed",
+        "status": "confirmed",
+        "guests": 1,
+        "notes": "",
+        "nights": 0,
+        "city_tax": 0.0,
+        "vat_platform_services": 0.0,
+        "cleaning_allocated": 0.0,
+        "withholding_tax": 0.0,
+        "net_operating": 0.0,
+        "net_real": 0.0,
+        "adr": 0.0,
+    }
+
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+
+    numeric_cols = [
+        "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+        "guests", "nights", "city_tax", "vat_platform_services",
+        "cleaning_allocated", "withholding_tax", "net_operating", "net_real", "adr",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    text_cols = ["platform", "guest_name", "guest_phone", "raw_booking_status", "status", "notes"]
+    for col in text_cols:
+        df[col] = df[col].fillna("").astype(str)
+
+    df["status"] = df["status"].replace("", "confirmed").apply(normalize_status)
+    df["guests"] = df["guests"].astype(int).clip(lower=1)
+    return df
 
 def calculate_hours_worked(start_time_str, end_time_str):
     try:
@@ -1258,106 +1358,43 @@ def load_message_settings(utente_id):
 
 
 def save_custom_booking(utente_id, data):
-    """
-    Salva una prenotazione custom e restituisce l'id creato.
-    Questa versione è volutamente più robusta per Postgres/Render:
-    - valida nome e date
-    - forza numeri/date in formati semplici
-    - usa RETURNING id su Postgres per verificare davvero l'inserimento
-    """
     guest_name_clean = str(data.get("guest_name", "") or "").strip()
     guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
-
     if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
         raise ValueError("Nome ospite non valido.")
     if guest_phone_clean.lower() == "guest_phone":
         guest_phone_clean = ""
 
-    check_in_date = hf_date(data.get("check_in"))
-    check_out_date = hf_date(data.get("check_out"))
-    if check_in_date is None or check_out_date is None:
-        raise ValueError("Date prenotazione custom non valide.")
-    if check_out_date <= check_in_date:
-        raise ValueError("Il check-out deve essere successivo al check-in.")
-
-    total_price = float(data.get("total_price", 0) or 0)
-    cleaning_cost = float(data.get("cleaning_cost", 0) or 0)
-    platform_fee = float(data.get("platform_fee", 0) or 0)
-    transaction_cost = float(data.get("transaction_cost", 0) or 0)
-    guests = max(1, int(data.get("guests", 1) or 1))
-    raw_status = str(data.get("raw_booking_status", "confirmed") or "confirmed")
-    status = normalize_status(data.get("status", raw_status))
-    notes = str(data.get("notes", "") or "")
-
     conn = get_conn()
     cur = conn.cursor()
-    try:
-        if USE_POSTGRES:
-            cur.execute(
-                """
-                INSERT INTO custom_bookings (
-                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-                    status, guests, notes, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                RETURNING id
-                """,
-                (
-                    int(utente_id),
-                    "Custom",
-                    guest_name_clean,
-                    guest_phone_clean,
-                    check_in_date.isoformat(),
-                    check_out_date.isoformat(),
-                    total_price,
-                    cleaning_cost,
-                    platform_fee,
-                    transaction_cost,
-                    raw_status,
-                    status,
-                    guests,
-                    notes,
-                ),
-            )
-            row = cur.fetchone()
-            inserted_id = int(row["id"] if isinstance(row, dict) else row[0])
-        else:
-            cur.execute(
-                """
-                INSERT INTO custom_bookings (
-                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-                    status, guests, notes, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    int(utente_id),
-                    "Custom",
-                    guest_name_clean,
-                    guest_phone_clean,
-                    check_in_date.isoformat(),
-                    check_out_date.isoformat(),
-                    total_price,
-                    cleaning_cost,
-                    platform_fee,
-                    transaction_cost,
-                    raw_status,
-                    status,
-                    guests,
-                    notes,
-                ),
-            )
-            inserted_id = int(cur.lastrowid)
-
-        conn.commit()
-        return inserted_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    cur.execute(
+        """
+        INSERT INTO custom_bookings (
+            utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+            cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+            status, guests, notes, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (
+            int(utente_id),
+            "Custom",
+            guest_name_clean,
+            guest_phone_clean,
+            str(data.get("check_in", "")),
+            str(data.get("check_out", "")),
+            float(data.get("total_price", 0) or 0),
+            float(data.get("cleaning_cost", 0) or 0),
+            float(data.get("platform_fee", 0) or 0),
+            float(data.get("transaction_cost", 0) or 0),
+            str(data.get("raw_booking_status", "confirmed") or "confirmed"),
+            str(data.get("status", "confirmed") or "confirmed"),
+            int(data.get("guests", 1) or 1),
+            str(data.get("notes", "") or ""),
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 
 def update_custom_booking(utente_id, booking_id, data):
@@ -1408,7 +1445,38 @@ def delete_custom_booking(utente_id, booking_id):
     return changed > 0
 
 
+def cleanup_bad_custom_bookings(utente_id):
+    """Elimina righe sporche create durante test/migrazione Postgres."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            DELETE FROM custom_bookings
+            WHERE utente_id = ?
+              AND (
+                    guest_name IS NULL
+                 OR TRIM(guest_name) = ''
+                 OR LOWER(TRIM(guest_name)) IN ('guest_name', 'nome ospite')
+                 OR LOWER(TRIM(COALESCE(guest_phone, ''))) = 'guest_phone'
+                 OR check_in IS NULL
+                 OR check_out IS NULL
+                 OR TRIM(CAST(check_in AS TEXT)) = ''
+                 OR TRIM(CAST(check_out AS TEXT)) = ''
+              )
+            """,
+            (int(utente_id),),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def load_custom_bookings(utente_id):
+    cleanup_bad_custom_bookings(utente_id)
+
     conn = get_conn()
     query = """
         SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
@@ -1416,7 +1484,7 @@ def load_custom_bookings(utente_id):
                raw_booking_status, status, guests, notes
         FROM custom_bookings
         WHERE utente_id = ?
-        ORDER BY date(check_in) ASC, id ASC
+        ORDER BY check_in ASC, id ASC
     """
     df = pd.read_sql_query(query, conn, params=(int(utente_id),))
     conn.close()
@@ -1424,52 +1492,69 @@ def load_custom_bookings(utente_id):
     if df.empty:
         return df
 
-    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
-    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
-    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["id"] = df["id"].astype(int)
-    df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].apply(normalize_status)
-    if "raw_booking_status" not in df.columns:
-        df["raw_booking_status"] = df["status"]
-    if "guest_phone" not in df.columns:
-        df["guest_phone"] = ""
-    df["guest_phone"] = df["guest_phone"].fillna("").astype(str)
-    return df
+    df = df.copy()
+    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce")
+    df["guest_name"] = df.get("guest_name", "").fillna("").astype(str).str.strip()
+    df["guest_phone"] = df.get("guest_phone", "").fillna("").astype(str).str.strip()
 
-    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
-    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
-    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["id"] = df["id"].astype(int)
-    df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].apply(normalize_status)
-    if "raw_booking_status" not in df.columns:
-        df["raw_booking_status"] = df["status"]
-    if "guest_phone" not in df.columns:
-        df["guest_phone"] = ""
-    return df
+    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
+    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
 
-    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
-    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
-    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+    valid_mask = (
+        df["id"].notna()
+        & (df["id"] > 0)
+        & df["guest_name"].ne("")
+        & ~df["guest_name"].str.lower().isin(["guest_name", "nome ospite"])
+        & ~df["guest_phone"].str.lower().isin(["guest_phone"])
+        & check_in_dt.notna()
+        & check_out_dt.notna()
+        & (check_out_dt > check_in_dt)
+    )
+
+    df = df[valid_mask].copy()
+    check_in_dt = check_in_dt[valid_mask]
+    check_out_dt = check_out_dt[valid_mask]
+
+    if df.empty:
+        return df
+
+    df["check_in"] = check_in_dt.dt.date
+    df["check_out"] = check_out_dt.dt.date
+
+    for col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        if col not in df.columns:
+            df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
     df["id"] = df["id"].astype(int)
     df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].apply(normalize_status)
+
+    if "status" not in df.columns:
+        df["status"] = "confirmed"
+    df["status"] = df["status"].fillna("confirmed").apply(normalize_status)
+
     if "raw_booking_status" not in df.columns:
         df["raw_booking_status"] = df["status"]
+    df["raw_booking_status"] = df["raw_booking_status"].fillna(df["status"]).astype(str)
+
+    if "notes" not in df.columns:
+        df["notes"] = ""
+    df["notes"] = df["notes"].fillna("").astype(str)
+
     return df
 
 
 def merge_booking_sources(base_df, custom_df):
+    base = ensure_booking_dataframe_columns(base_df) if base_df is not None else pd.DataFrame()
+    custom = ensure_booking_dataframe_columns(custom_df) if custom_df is not None else pd.DataFrame()
 
-    if base_df is None or len(base_df) == 0:
-        return custom_df.copy() if custom_df is not None else pd.DataFrame()
-    if custom_df is None or len(custom_df) == 0:
-        return base_df.copy()
-    return pd.concat([base_df.copy(), custom_df.copy()], ignore_index=True, sort=False)
+    if base.empty and custom.empty:
+        return ensure_booking_dataframe_columns(pd.DataFrame())
+    if base.empty:
+        return custom.copy()
+    if custom.empty:
+        return base.copy()
+    return ensure_booking_dataframe_columns(pd.concat([base, custom], ignore_index=True, sort=False))
 
 
 def sidebar_defaults():
@@ -1889,8 +1974,32 @@ def enrich_financials(
     selected_month=None,
     utente_id=None,
 ):
-    out = df.copy()
-    out["nights"] = (pd.to_datetime(out["check_out"]) - pd.to_datetime(out["check_in"])).dt.days.clip(lower=1)
+    out = ensure_booking_dataframe_columns(df)
+
+    # Postgres può restituire alcuni valori numerici come testo.
+    # Li forziamo qui prima di fare moltiplicazioni/sottrazioni, così la dashboard non crasha.
+    for numeric_col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        if numeric_col not in out.columns:
+            out[numeric_col] = 0
+        out[numeric_col] = pd.to_numeric(out[numeric_col], errors="coerce").fillna(0)
+
+    out["guests"] = out["guests"].astype(int).clip(lower=1)
+    out["status"] = out.get("status", "confirmed").fillna("confirmed").astype(str).apply(normalize_status)
+    out["platform"] = out.get("platform", "").fillna("").astype(str)
+
+    check_in_dt = pd.to_datetime(out["check_in"], errors="coerce")
+    check_out_dt = pd.to_datetime(out["check_out"], errors="coerce")
+    valid_dates = check_in_dt.notna() & check_out_dt.notna() & (check_out_dt > check_in_dt)
+    out = out[valid_dates].copy()
+    check_in_dt = check_in_dt[valid_dates]
+    check_out_dt = check_out_dt[valid_dates]
+
+    if out.empty:
+        return ensure_booking_dataframe_columns(out)
+
+    out["check_in"] = check_in_dt.dt.date
+    out["check_out"] = check_out_dt.dt.date
+    out["nights"] = (check_out_dt - check_in_dt).dt.days.clip(lower=1)
 
     if include_city_tax:
         out["city_tax"] = (out["guests"] * out["nights"] * float(city_tax_rate)).round(2)
@@ -1995,8 +2104,8 @@ def month_slice(df, year, month):
     next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
     active = df[
         (df["status"].str.lower() != "cancelled")
-        & (pd.to_datetime(df["check_in"]).dt.date < next_month)
-        & (pd.to_datetime(df["check_out"]).dt.date >= month_start)
+        & (hf_date_series(df["check_in"]) < hf_bound(next_month))
+        & (hf_date_series(df["check_out"]) >= hf_bound(month_start))
     ].copy()
     return active, month_start, next_month
 
@@ -2007,8 +2116,12 @@ def month_stats(df, year, month):
 
     occupied_dates = set()
     for _, row in active.iterrows():
-        start = max(row["check_in"], month_start)
-        end = min(row["check_out"], next_month)
+        row_check_in = hf_date(row["check_in"])
+        row_check_out = hf_date(row["check_out"])
+        if row_check_in is None or row_check_out is None:
+            continue
+        start = max(row_check_in, month_start)
+        end = min(row_check_out, next_month)
         for d in pd.date_range(start, end - timedelta(days=1), freq="D"):
             occupied_dates.add(d.date())
 
@@ -2033,6 +2146,7 @@ def month_stats(df, year, month):
 
 
 def annual_summary(df, year):
+    df = ensure_booking_dataframe_columns(df)
     valid = df[
         (df["status"].str.lower() != "cancelled")
         & (pd.to_datetime(df["check_in"]).dt.year == year)
@@ -2096,17 +2210,22 @@ def get_period_bounds(year, period_mode="Mensile", month=1, quarter=1, semester=
 
 
 def period_stats(df, start_date, end_date):
+    df = ensure_booking_dataframe_columns(df)
     active = df[
         (df["status"].str.lower() != "cancelled")
-        & (pd.to_datetime(df["check_in"]).dt.date < end_date)
-        & (pd.to_datetime(df["check_out"]).dt.date >= start_date)
+        & (hf_date_series(df["check_in"]) < hf_bound(end_date))
+        & (hf_date_series(df["check_out"]) >= hf_bound(start_date))
     ].copy()
 
     days_in_period = (end_date - start_date).days
     occupied_dates = set()
     for _, row in active.iterrows():
-        start = max(row["check_in"], start_date)
-        end = min(row["check_out"], end_date)
+        row_check_in = hf_date(row["check_in"])
+        row_check_out = hf_date(row["check_out"])
+        if row_check_in is None or row_check_out is None:
+            continue
+        start = max(row_check_in, start_date)
+        end = min(row_check_out, end_date)
         for d in pd.date_range(start, end - timedelta(days=1), freq="D"):
             occupied_dates.add(d.date())
 
@@ -2114,8 +2233,8 @@ def period_stats(df, start_date, end_date):
     occupancy = round((occupied_nights / days_in_period) * 100, 1) if days_in_period else 0
 
     arrivals = active[
-        (pd.to_datetime(active["check_in"]).dt.date >= start_date)
-        & (pd.to_datetime(active["check_in"]).dt.date < end_date)
+        (hf_date_series(active["check_in"]) >= hf_bound(start_date))
+        & (hf_date_series(active["check_in"]) < hf_bound(end_date))
     ].copy()
     total_bookings = len(arrivals)
 
@@ -2131,10 +2250,7 @@ def period_stats(df, start_date, end_date):
 
 
 def filter_df_by_period(df, start_date, end_date):
-    return df[
-        (pd.to_datetime(df["check_in"]).dt.date >= start_date)
-        & (pd.to_datetime(df["check_in"]).dt.date < end_date)
-    ].copy()
+    return df[hf_filter_between_dates(df, "check_in", start_date, end_date)].copy()
 
 
 def build_period_summary(df, year, period_mode="Mensile", custom_start=None, custom_end=None):
@@ -2254,20 +2370,25 @@ def get_period_bounds(period_mode, year, month=1, quarter=1, semester=1, custom_
 def period_slice(df, start_date, end_date):
     active = df[
         (df["status"].str.lower() != "cancelled")
-        & (pd.to_datetime(df["check_in"]).dt.date < end_date)
-        & (pd.to_datetime(df["check_out"]).dt.date >= start_date)
+        & (hf_date_series(df["check_in"]) < hf_bound(end_date))
+        & (hf_date_series(df["check_out"]) >= hf_bound(start_date))
     ].copy()
     return active
 
 
 def period_stats(df, start_date, end_date):
+    df = ensure_booking_dataframe_columns(df)
     active = period_slice(df, start_date, end_date)
     days_in_period = max((end_date - start_date).days, 1)
 
     occupied_dates = set()
     for _, row in active.iterrows():
-        row_start = max(row["check_in"], start_date)
-        row_end = min(row["check_out"], end_date)
+        row_check_in = hf_date(row["check_in"])
+        row_check_out = hf_date(row["check_out"])
+        if row_check_in is None or row_check_out is None:
+            continue
+        row_start = max(row_check_in, start_date)
+        row_end = min(row_check_out, end_date)
         if row_end <= row_start:
             continue
         for d in pd.date_range(row_start, row_end - timedelta(days=1), freq="D"):
@@ -2277,8 +2398,8 @@ def period_stats(df, start_date, end_date):
     occupancy = round((occupied_nights / days_in_period) * 100, 1) if days_in_period else 0
 
     period_res = active[
-        (pd.to_datetime(active["check_in"]).dt.date >= start_date)
-        & (pd.to_datetime(active["check_in"]).dt.date < end_date)
+        (hf_date_series(active["check_in"]) >= hf_bound(start_date))
+        & (hf_date_series(active["check_in"]) < hf_bound(end_date))
     ].copy()
     total_bookings = len(period_res)
 
@@ -2747,7 +2868,7 @@ def load_scheduled_messages(utente_id):
                channel, status, message_text, created_at, sent_at, error_message
         FROM scheduled_messages
         WHERE utente_id = ?
-        ORDER BY datetime(send_at) ASC, id ASC
+        ORDER BY send_at ASC, id ASC
     """
     df = pd.read_sql_query(query, conn, params=(utente_id,))
     conn.close()
@@ -2879,6 +3000,28 @@ def message_templates(guest_name, check_in, check_out, property_name, checkin_ti
     }
 
 
+
+def format_date_safe(value, fallback="-"):
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return fallback
+        return dt.strftime("%d/%m/%Y")
+    except Exception:
+        return fallback
+
+
+def date_value_safe(value, fallback=None):
+    fallback = fallback or date.today()
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return fallback
+        return dt.date()
+    except Exception:
+        return fallback
+
+
 def render_dashboard_dataframe(df_to_show, user_id):
     all_columns = list(df_to_show.columns)
     saved_settings = carica_sidebar_settings(user_id)
@@ -2954,8 +3097,6 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.rerun()
 
     custom_bookings_df = load_custom_bookings(user_id)
-    if st.session_state.get("last_custom_booking_saved_id"):
-        st.success(f"Ultima prenotazione custom salvata: ID {st.session_state.get('last_custom_booking_saved_id')}")
 
     with st.expander("Aggiungi prenotazione custom", expanded=False):
         st.caption("Usa questa sezione per aggiungere prenotazioni non arrivate da Booking. Verranno integrate nella dashboard e nelle altre analisi.")
@@ -2983,36 +3124,32 @@ def render_dashboard_dataframe(df_to_show, user_id):
             elif custom_check_out <= custom_check_in:
                 st.error("Il check-out deve essere successivo al check-in.")
             else:
-                try:
-                    inserted_custom_id = save_custom_booking(
-                        user_id,
-                        {
-                            "guest_name": custom_guest_name,
-                            "guest_phone": custom_guest_phone,
-                            "check_in": custom_check_in.isoformat(),
-                            "check_out": custom_check_out.isoformat(),
-                            "total_price": custom_total_price,
-                            "cleaning_cost": custom_cleaning_cost,
-                            "platform_fee": 0.0,
-                            "transaction_cost": 0.0,
-                            "raw_booking_status": custom_status,
-                            "status": custom_status,
-                            "guests": custom_guests,
-                            "notes": custom_notes,
-                        },
-                    )
-                    st.session_state["last_custom_booking_saved_id"] = inserted_custom_id
-                    st.success(f"Prenotazione custom salvata correttamente. ID: {inserted_custom_id}")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Errore salvataggio prenotazione custom: {exc}")
+                save_custom_booking(
+                    user_id,
+                    {
+                        "guest_name": custom_guest_name,
+                        "guest_phone": custom_guest_phone,
+                        "check_in": custom_check_in.isoformat(),
+                        "check_out": custom_check_out.isoformat(),
+                        "total_price": custom_total_price,
+                        "cleaning_cost": custom_cleaning_cost,
+                        "platform_fee": 0.0,
+                        "transaction_cost": 0.0,
+                        "raw_booking_status": custom_status,
+                        "status": custom_status,
+                        "guests": custom_guests,
+                        "notes": custom_notes,
+                    },
+                )
+                st.success("Prenotazione custom salvata correttamente.")
+                st.rerun()
 
         st.markdown("#### Prenotazioni custom inserite")
         if custom_bookings_df.empty:
             st.info("Non hai ancora inserito prenotazioni custom.")
         else:
             edit_options = {
-                f'#{int(row["id"])} · {row["guest_name"]} · {pd.to_datetime(row["check_in"]).strftime("%d/%m/%Y")} → {pd.to_datetime(row["check_out"]).strftime("%d/%m/%Y")}': int(row["id"])
+                f'#{int(row["id"])} · {row["guest_name"]} · {format_date_safe(row.get("check_in"))} → {format_date_safe(row.get("check_out"))}': int(row["id"])
                 for _, row in custom_bookings_df.iterrows()
             }
             selected_custom_label = st.selectbox(
@@ -3031,8 +3168,8 @@ def render_dashboard_dataframe(df_to_show, user_id):
                     value=str(selected_custom_row.get("guest_phone", "") or ""),
                     key=f"edit_custom_guest_phone_{selected_custom_id}"
                 )
-                edit_check_in = st.date_input("Check-in", value=pd.to_datetime(selected_custom_row["check_in"]).date(), key=f"edit_custom_check_in_{selected_custom_id}")
-                edit_check_out = st.date_input("Check-out", value=pd.to_datetime(selected_custom_row["check_out"]).date(), key=f"edit_custom_check_out_{selected_custom_id}")
+                edit_check_in = st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
+                edit_check_out = st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
                 edit_guests = st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
             with ec2:
                 edit_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
@@ -3851,6 +3988,7 @@ if uploaded_file or not custom_bookings_df.empty:
             selected_month=selected_month,
             utente_id=st.session_state.utente["id"],
         )
+        df = ensure_booking_dataframe_columns(df)
         period_start, period_end, period_label = get_period_bounds(
             period_mode,
             selected_year,
@@ -4756,8 +4894,8 @@ if "pulizie_servizi" in tab_map:
                 current_period_cleaning = cleaning_df.copy()
                 current_period_cleaning["service_date_dt"] = pd.to_datetime(current_period_cleaning["service_date"], errors="coerce").dt.date
                 current_period_cleaning = current_period_cleaning[
-                    (current_period_cleaning["service_date_dt"] >= period_start) &
-                    (current_period_cleaning["service_date_dt"] < period_end)
+                    (hf_date_series(current_period_cleaning["service_date"]) >= hf_bound(period_start)) &
+                    (hf_date_series(current_period_cleaning["service_date"]) < hf_bound(period_end))
                 ].copy()
 
             k1, k2, k3, k4 = st.columns(4)
@@ -4821,13 +4959,15 @@ if "pulizie_servizi" in tab_map:
             booking_options = []
             for _, row in dashboard_cleaning_source.iterrows():
                 booking_ref_value = booking_reference(row)
-                label = f'{row["guest_name"]} · check-out {pd.to_datetime(row["check_out"]).strftime("%d/%m/%Y")} · check-in {pd.to_datetime(row["check_in"]).strftime("%d/%m/%Y")}'
+                check_out_safe = date_value_safe(row.get("check_out"))
+                check_in_safe = date_value_safe(row.get("check_in"))
+                label = f'{row["guest_name"]} · check-out {format_date_safe(row.get("check_out"))} · check-in {format_date_safe(row.get("check_in"))}'
                 booking_options.append({
                     "booking_ref": booking_ref_value,
                     "label": label,
                     "guest_name": str(row.get("guest_name", "")),
-                    "checkout_date": pd.to_datetime(row.get("check_out")).date(),
-                    "checkin_date": pd.to_datetime(row.get("check_in")).date(),
+                    "checkout_date": check_out_safe,
+                    "checkin_date": check_in_safe,
                 })
 
             selected_booking = None
