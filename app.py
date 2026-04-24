@@ -1616,6 +1616,49 @@ def merge_booking_sources(base_df, custom_df):
     return ensure_booking_dataframe_columns(pd.concat([base, custom], ignore_index=True, sort=False))
 
 
+
+def custom_payload_to_df(payload):
+    """Converte l'ultima prenotazione custom salvata in DataFrame di fallback visibile subito."""
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    row = {
+        "id": int(payload.get("id", 0) or 0),
+        "platform": "Custom",
+        "guest_name": str(payload.get("guest_name", "") or "").strip(),
+        "guest_phone": str(payload.get("guest_phone", "") or "").strip(),
+        "check_in": hf_date(payload.get("check_in")),
+        "check_out": hf_date(payload.get("check_out")),
+        "total_price": float(payload.get("total_price", 0) or 0),
+        "cleaning_cost": float(payload.get("cleaning_cost", 0) or 0),
+        "platform_fee": 0.0,
+        "transaction_cost": 0.0,
+        "raw_booking_status": str(payload.get("raw_booking_status", "confirmed") or "confirmed"),
+        "status": normalize_status(payload.get("status", "confirmed") or "confirmed"),
+        "guests": int(payload.get("guests", 1) or 1),
+        "notes": str(payload.get("notes", "") or ""),
+    }
+    if not row["guest_name"] or row["check_in"] is None or row["check_out"] is None or row["check_out"] <= row["check_in"]:
+        return pd.DataFrame()
+    return ensure_booking_dataframe_columns(pd.DataFrame([row]))
+
+
+def append_last_saved_custom_if_missing(custom_df):
+    """Fallback: se Postgres ha salvato ma la lettura immediata non mostra ancora la riga, la aggiunge alla vista corrente."""
+    last_payload = st.session_state.get("last_saved_custom_booking_payload")
+    fallback_df = custom_payload_to_df(last_payload)
+    if fallback_df.empty:
+        return custom_df if custom_df is not None else pd.DataFrame()
+
+    current = custom_df.copy() if custom_df is not None else pd.DataFrame()
+    new_id = int(fallback_df.iloc[0].get("id", 0) or 0)
+    if not current.empty and "id" in current.columns:
+        current_ids = pd.to_numeric(current["id"], errors="coerce").fillna(0).astype(int).tolist()
+        if new_id in current_ids:
+            return current
+
+    return pd.concat([current, fallback_df], ignore_index=True, sort=False)
+
+
 def sidebar_defaults():
     today = date.today()
     return {
@@ -3155,7 +3198,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.success("Layout tabella ripristinato.")
             st.rerun()
 
-    custom_bookings_df = load_custom_bookings(user_id)
+    custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
     if st.session_state.get("custom_booking_saved_ok"):
         st.success(st.session_state.pop("custom_booking_saved_ok"))
 
@@ -3186,23 +3229,23 @@ def render_dashboard_dataframe(df_to_show, user_id):
                 st.error("Il check-out deve essere successivo al check-in.")
             else:
                 try:
-                    new_custom_id = save_custom_booking(
-                        user_id,
-                        {
-                            "guest_name": custom_guest_name,
-                            "guest_phone": custom_guest_phone,
-                            "check_in": custom_check_in.isoformat(),
-                            "check_out": custom_check_out.isoformat(),
-                            "total_price": custom_total_price,
-                            "cleaning_cost": custom_cleaning_cost,
-                            "platform_fee": 0.0,
-                            "transaction_cost": 0.0,
-                            "raw_booking_status": custom_status,
-                            "status": custom_status,
-                            "guests": custom_guests,
-                            "notes": custom_notes,
-                        },
-                    )
+                    custom_payload = {
+                        "guest_name": custom_guest_name,
+                        "guest_phone": custom_guest_phone,
+                        "check_in": custom_check_in.isoformat(),
+                        "check_out": custom_check_out.isoformat(),
+                        "total_price": custom_total_price,
+                        "cleaning_cost": custom_cleaning_cost,
+                        "platform_fee": 0.0,
+                        "transaction_cost": 0.0,
+                        "raw_booking_status": custom_status,
+                        "status": custom_status,
+                        "guests": custom_guests,
+                        "notes": custom_notes,
+                    }
+                    new_custom_id = save_custom_booking(user_id, custom_payload)
+                    custom_payload["id"] = new_custom_id
+                    st.session_state["last_saved_custom_booking_payload"] = custom_payload
                     st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
                     st.rerun()
                 except Exception as exc:
@@ -4026,7 +4069,7 @@ filtered_df = None
 stats = None
 annual = None
 
-custom_bookings_df = load_custom_bookings(st.session_state.utente["id"])
+custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(st.session_state.utente["id"]))
 
 if uploaded_file or not custom_bookings_df.empty:
     try:
