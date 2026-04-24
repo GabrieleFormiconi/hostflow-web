@@ -1508,10 +1508,11 @@ def delete_custom_booking(utente_id, booking_id):
 
     if row:
         try:
-            platform = str(row.get("platform", "Custom") or "Custom")
-            guest_name = str(row.get("guest_name", "") or "").strip()
-            check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
-            check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
+            row_dict = dict(row)
+            platform = str(row_dict.get("platform", "Custom") or "Custom")
+            guest_name = str(row_dict.get("guest_name", "") or "").strip()
+            check_in = pd.to_datetime(row_dict.get("check_in"), errors="coerce")
+            check_out = pd.to_datetime(row_dict.get("check_out"), errors="coerce")
             if guest_name and pd.notna(check_in) and pd.notna(check_out):
                 booking_ref_pipe = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
                 booking_ref_bars = f"{platform}||{guest_name}||{check_in.date().isoformat()}||{check_out.date().isoformat()}"
@@ -2715,8 +2716,14 @@ def build_scheduled_messages_for_booking(row, profilo, scheduling_rules=None, te
     guest_name = str(row.get("guest_name", "") or "").strip() or "Ospite"
     guest_phone = str(row.get("guest_phone", "") or "").strip()
     platform = str(row.get("platform", "") or "").strip() or "Booking"
-    check_in = pd.to_datetime(row.get("check_in")).to_pydatetime()
-    check_out = pd.to_datetime(row.get("check_out")).to_pydatetime()
+
+    check_in_ts = pd.to_datetime(row.get("check_in"), errors="coerce")
+    check_out_ts = pd.to_datetime(row.get("check_out"), errors="coerce")
+    if pd.isna(check_in_ts) or pd.isna(check_out_ts) or check_out_ts <= check_in_ts:
+        return []
+
+    check_in = check_in_ts.to_pydatetime()
+    check_out = check_out_ts.to_pydatetime()
 
     booking_ref = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
 
@@ -3242,7 +3249,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.success("Layout tabella ripristinato.")
             st.rerun()
 
-    custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
+    custom_bookings_df = load_custom_bookings(user_id)
     if st.session_state.get("custom_booking_saved_ok"):
         st.success(st.session_state.pop("custom_booking_saved_ok"))
 
@@ -3288,10 +3295,17 @@ def render_dashboard_dataframe(df_to_show, user_id):
                         "notes": custom_notes,
                     }
                     new_custom_id = save_custom_booking(user_id, custom_payload)
-                    custom_payload["id"] = new_custom_id
-                    st.session_state["last_saved_custom_booking_payload"] = custom_payload
-                    st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
-                    st.rerun()
+                    reloaded_custom_df = load_custom_bookings(user_id)
+                    saved_ids = []
+                    if not reloaded_custom_df.empty and "id" in reloaded_custom_df.columns:
+                        saved_ids = pd.to_numeric(reloaded_custom_df["id"], errors="coerce").dropna().astype(int).tolist()
+
+                    if new_custom_id is None or int(new_custom_id) not in saved_ids:
+                        st.error("La prenotazione non risulta salvata nel database dopo il salvataggio. Riprova e, se persiste, verifica DATABASE_URL/Postgres su Render.")
+                    else:
+                        st.session_state.pop("last_saved_custom_booking_payload", None)
+                        st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
+                        st.rerun()
                 except Exception as exc:
                     st.error(f"Errore salvataggio prenotazione custom: {exc}")
 
@@ -3359,14 +3373,20 @@ def render_dashboard_dataframe(df_to_show, user_id):
                             },
                         )
                         if ok:
+                            st.session_state.pop("last_saved_custom_booking_payload", None)
                             st.success("Prenotazione custom aggiornata.")
                             st.rerun()
+                        else:
+                            st.error("Non sono riuscita ad aggiornare la prenotazione custom nel database.")
             with ea2:
                 if st.button("Elimina prenotazione custom", use_container_width=True, key=f"delete_custom_booking_button_{selected_custom_id}"):
                     ok = delete_custom_booking(user_id, selected_custom_id)
                     if ok:
+                        st.session_state.pop("last_saved_custom_booking_payload", None)
                         st.success("Prenotazione custom eliminata.")
                         st.rerun()
+                    else:
+                        st.error("Non sono riuscita a eliminare la prenotazione custom dal database.")
 
 
     visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
@@ -4113,7 +4133,7 @@ filtered_df = None
 stats = None
 annual = None
 
-custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(st.session_state.utente["id"]))
+custom_bookings_df = load_custom_bookings(st.session_state.utente["id"])
 
 if uploaded_file or not custom_bookings_df.empty:
     try:
