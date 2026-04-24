@@ -1345,6 +1345,11 @@ def load_message_settings(utente_id):
 
 
 def save_custom_booking(utente_id, data):
+    """Salva una prenotazione custom e restituisce l'id creato.
+
+    Qui uso i valori puliti esplicitamente perché Streamlit/Postgres, durante la
+    migrazione, aveva salvato alcune righe sporche tipo guest_name/guest_phone.
+    """
     guest_name_clean = str(data.get("guest_name", "") or "").strip()
     guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
     if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
@@ -1352,36 +1357,68 @@ def save_custom_booking(utente_id, data):
     if guest_phone_clean.lower() == "guest_phone":
         guest_phone_clean = ""
 
+    check_in_clean = str(data.get("check_in", "") or "").strip()
+    check_out_clean = str(data.get("check_out", "") or "").strip()
+    check_in_dt = pd.to_datetime(check_in_clean, errors="coerce")
+    check_out_dt = pd.to_datetime(check_out_clean, errors="coerce")
+    if pd.isna(check_in_dt) or pd.isna(check_out_dt) or check_out_dt <= check_in_dt:
+        raise ValueError("Date prenotazione custom non valide.")
+
+    params = (
+        int(utente_id),
+        "Custom",
+        guest_name_clean,
+        guest_phone_clean,
+        check_in_dt.date().isoformat(),
+        check_out_dt.date().isoformat(),
+        float(data.get("total_price", 0) or 0),
+        float(data.get("cleaning_cost", 0) or 0),
+        float(data.get("platform_fee", 0) or 0),
+        float(data.get("transaction_cost", 0) or 0),
+        str(data.get("raw_booking_status", "confirmed") or "confirmed"),
+        str(data.get("status", "confirmed") or "confirmed"),
+        int(data.get("guests", 1) or 1),
+        str(data.get("notes", "") or ""),
+    )
+
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO custom_bookings (
-            utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-            cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-            status, guests, notes, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """,
-        (
-            int(utente_id),
-            "Custom",
-            guest_name_clean,
-            guest_phone_clean,
-            str(data.get("check_in", "")),
-            str(data.get("check_out", "")),
-            float(data.get("total_price", 0) or 0),
-            float(data.get("cleaning_cost", 0) or 0),
-            float(data.get("platform_fee", 0) or 0),
-            float(data.get("transaction_cost", 0) or 0),
-            str(data.get("raw_booking_status", "confirmed") or "confirmed"),
-            str(data.get("status", "confirmed") or "confirmed"),
-            int(data.get("guests", 1) or 1),
-            str(data.get("notes", "") or ""),
-        ),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        if USE_POSTGRES:
+            cur.execute(
+                """
+                INSERT INTO custom_bookings (
+                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+                    status, guests, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                params,
+            )
+            inserted_row = cur.fetchone()
+            inserted_id = int(inserted_row["id"] if isinstance(inserted_row, dict) else inserted_row[0])
+        else:
+            cur.execute(
+                """
+                INSERT INTO custom_bookings (
+                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+                    status, guests, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                params,
+            )
+            inserted_id = int(cur.lastrowid)
+        conn.commit()
+        return inserted_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def update_custom_booking(utente_id, booking_id, data):
@@ -3109,30 +3146,44 @@ def render_dashboard_dataframe(df_to_show, user_id):
             create_custom_booking_clicked = st.form_submit_button("Salva prenotazione custom", use_container_width=True)
 
         if create_custom_booking_clicked:
-            if not str(custom_guest_name).strip():
+            # Leggo direttamente da session_state per evitare valori sporchi/stale del form.
+            form_guest_name = str(st.session_state.get("custom_booking_guest_name", "") or "").strip()
+            form_guest_phone = str(st.session_state.get("custom_booking_guest_phone", "") or "").strip()
+            form_check_in = st.session_state.get("custom_booking_check_in", custom_check_in)
+            form_check_out = st.session_state.get("custom_booking_check_out", custom_check_out)
+            form_guests = int(st.session_state.get("custom_booking_guests", custom_guests) or 1)
+            form_total_price = float(st.session_state.get("custom_booking_total_price", custom_total_price) or 0)
+            form_cleaning_cost = float(st.session_state.get("custom_booking_cleaning_cost", custom_cleaning_cost) or 0)
+            form_status = str(st.session_state.get("custom_booking_status", custom_status) or "confirmed")
+            form_notes = str(st.session_state.get("custom_booking_notes", custom_notes) or "")
+
+            if not form_guest_name:
                 st.error("Inserisci il nome ospite.")
-            elif custom_check_out <= custom_check_in:
+            elif form_check_out <= form_check_in:
                 st.error("Il check-out deve essere successivo al check-in.")
             else:
-                save_custom_booking(
-                    user_id,
-                    {
-                        "guest_name": custom_guest_name,
-                        "guest_phone": custom_guest_phone,
-                        "check_in": custom_check_in.isoformat(),
-                        "check_out": custom_check_out.isoformat(),
-                        "total_price": custom_total_price,
-                        "cleaning_cost": custom_cleaning_cost,
-                        "platform_fee": 0.0,
-                        "transaction_cost": 0.0,
-                        "raw_booking_status": custom_status,
-                        "status": custom_status,
-                        "guests": custom_guests,
-                        "notes": custom_notes,
-                    },
-                )
-                st.success("Prenotazione custom salvata correttamente.")
-                st.rerun()
+                try:
+                    new_booking_id = save_custom_booking(
+                        user_id,
+                        {
+                            "guest_name": form_guest_name,
+                            "guest_phone": form_guest_phone,
+                            "check_in": form_check_in.isoformat(),
+                            "check_out": form_check_out.isoformat(),
+                            "total_price": form_total_price,
+                            "cleaning_cost": form_cleaning_cost,
+                            "platform_fee": 0.0,
+                            "transaction_cost": 0.0,
+                            "raw_booking_status": form_status,
+                            "status": form_status,
+                            "guests": form_guests,
+                            "notes": form_notes,
+                        },
+                    )
+                    st.success(f"Prenotazione custom salvata correttamente. ID #{new_booking_id}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Errore salvataggio prenotazione custom: {exc}")
 
         st.markdown("#### Prenotazioni custom inserite")
         if custom_bookings_df.empty:
