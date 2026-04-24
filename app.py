@@ -1358,43 +1358,102 @@ def load_message_settings(utente_id):
 
 
 def save_custom_booking(utente_id, data):
+    """Salva una prenotazione custom e restituisce l'ID creato.
+    Versione robusta per Postgres/SQLite: valida i dati prima dell'insert e verifica che la riga sia stata creata.
+    """
     guest_name_clean = str(data.get("guest_name", "") or "").strip()
     guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
+
     if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
         raise ValueError("Nome ospite non valido.")
     if guest_phone_clean.lower() == "guest_phone":
         guest_phone_clean = ""
 
+    check_in_value = hf_date(data.get("check_in"))
+    check_out_value = hf_date(data.get("check_out"))
+    if check_in_value is None or check_out_value is None:
+        raise ValueError("Date check-in/check-out non valide.")
+    if check_out_value <= check_in_value:
+        raise ValueError("Il check-out deve essere successivo al check-in.")
+
+    total_price_value = float(data.get("total_price", 0) or 0)
+    cleaning_cost_value = float(data.get("cleaning_cost", 0) or 0)
+    platform_fee_value = float(data.get("platform_fee", 0) or 0)
+    transaction_cost_value = float(data.get("transaction_cost", 0) or 0)
+    guests_value = max(1, int(data.get("guests", 1) or 1))
+    status_value = normalize_status(data.get("status", "confirmed") or "confirmed")
+    raw_status_value = str(data.get("raw_booking_status", status_value) or status_value)
+    notes_value = str(data.get("notes", "") or "")
+
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO custom_bookings (
-            utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-            cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-            status, guests, notes, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """,
-        (
-            int(utente_id),
-            "Custom",
-            guest_name_clean,
-            guest_phone_clean,
-            str(data.get("check_in", "")),
-            str(data.get("check_out", "")),
-            float(data.get("total_price", 0) or 0),
-            float(data.get("cleaning_cost", 0) or 0),
-            float(data.get("platform_fee", 0) or 0),
-            float(data.get("transaction_cost", 0) or 0),
-            str(data.get("raw_booking_status", "confirmed") or "confirmed"),
-            str(data.get("status", "confirmed") or "confirmed"),
-            int(data.get("guests", 1) or 1),
-            str(data.get("notes", "") or ""),
-        ),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        if USE_POSTGRES:
+            cur.execute(
+                """
+                INSERT INTO custom_bookings (
+                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+                    status, guests, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (
+                    int(utente_id),
+                    "Custom",
+                    guest_name_clean,
+                    guest_phone_clean,
+                    check_in_value.isoformat(),
+                    check_out_value.isoformat(),
+                    total_price_value,
+                    cleaning_cost_value,
+                    platform_fee_value,
+                    transaction_cost_value,
+                    raw_status_value,
+                    status_value,
+                    guests_value,
+                    notes_value,
+                ),
+            )
+            inserted = cur.fetchone()
+            new_id = inserted["id"] if inserted and "id" in inserted else None
+        else:
+            cur.execute(
+                """
+                INSERT INTO custom_bookings (
+                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+                    status, guests, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    int(utente_id),
+                    "Custom",
+                    guest_name_clean,
+                    guest_phone_clean,
+                    check_in_value.isoformat(),
+                    check_out_value.isoformat(),
+                    total_price_value,
+                    cleaning_cost_value,
+                    platform_fee_value,
+                    transaction_cost_value,
+                    raw_status_value,
+                    status_value,
+                    guests_value,
+                    notes_value,
+                ),
+            )
+            new_id = cur.lastrowid
+
+        conn.commit()
+        return int(new_id) if new_id is not None else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def update_custom_booking(utente_id, booking_id, data):
@@ -3097,6 +3156,8 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.rerun()
 
     custom_bookings_df = load_custom_bookings(user_id)
+    if st.session_state.get("custom_booking_saved_ok"):
+        st.success(st.session_state.pop("custom_booking_saved_ok"))
 
     with st.expander("Aggiungi prenotazione custom", expanded=False):
         st.caption("Usa questa sezione per aggiungere prenotazioni non arrivate da Booking. Verranno integrate nella dashboard e nelle altre analisi.")
@@ -3124,25 +3185,28 @@ def render_dashboard_dataframe(df_to_show, user_id):
             elif custom_check_out <= custom_check_in:
                 st.error("Il check-out deve essere successivo al check-in.")
             else:
-                save_custom_booking(
-                    user_id,
-                    {
-                        "guest_name": custom_guest_name,
-                        "guest_phone": custom_guest_phone,
-                        "check_in": custom_check_in.isoformat(),
-                        "check_out": custom_check_out.isoformat(),
-                        "total_price": custom_total_price,
-                        "cleaning_cost": custom_cleaning_cost,
-                        "platform_fee": 0.0,
-                        "transaction_cost": 0.0,
-                        "raw_booking_status": custom_status,
-                        "status": custom_status,
-                        "guests": custom_guests,
-                        "notes": custom_notes,
-                    },
-                )
-                st.success("Prenotazione custom salvata correttamente.")
-                st.rerun()
+                try:
+                    new_custom_id = save_custom_booking(
+                        user_id,
+                        {
+                            "guest_name": custom_guest_name,
+                            "guest_phone": custom_guest_phone,
+                            "check_in": custom_check_in.isoformat(),
+                            "check_out": custom_check_out.isoformat(),
+                            "total_price": custom_total_price,
+                            "cleaning_cost": custom_cleaning_cost,
+                            "platform_fee": 0.0,
+                            "transaction_cost": 0.0,
+                            "raw_booking_status": custom_status,
+                            "status": custom_status,
+                            "guests": custom_guests,
+                            "notes": custom_notes,
+                        },
+                    )
+                    st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Errore salvataggio prenotazione custom: {exc}")
 
         st.markdown("#### Prenotazioni custom inserite")
         if custom_bookings_df.empty:
