@@ -451,6 +451,57 @@ def hf_date_series(series):
 def hf_bound(value):
     return pd.Timestamp(value).normalize()
 
+
+def ensure_booking_dataframe_columns(df):
+    """Garantisce che il DataFrame abbia sempre le colonne minime usate dalla dashboard."""
+    if df is None:
+        df = pd.DataFrame()
+    df = df.copy()
+
+    defaults = {
+        "platform": "",
+        "guest_name": "",
+        "guest_phone": "",
+        "check_in": pd.NaT,
+        "check_out": pd.NaT,
+        "total_price": 0.0,
+        "cleaning_cost": 0.0,
+        "platform_fee": 0.0,
+        "transaction_cost": 0.0,
+        "raw_booking_status": "confirmed",
+        "status": "confirmed",
+        "guests": 1,
+        "notes": "",
+        "nights": 0,
+        "city_tax": 0.0,
+        "vat_platform_services": 0.0,
+        "cleaning_allocated": 0.0,
+        "withholding_tax": 0.0,
+        "net_operating": 0.0,
+        "net_real": 0.0,
+        "adr": 0.0,
+    }
+
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+
+    numeric_cols = [
+        "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+        "guests", "nights", "city_tax", "vat_platform_services",
+        "cleaning_allocated", "withholding_tax", "net_operating", "net_real", "adr",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    text_cols = ["platform", "guest_name", "guest_phone", "raw_booking_status", "status", "notes"]
+    for col in text_cols:
+        df[col] = df[col].fillna("").astype(str)
+
+    df["status"] = df["status"].replace("", "confirmed").apply(normalize_status)
+    df["guests"] = df["guests"].astype(int).clip(lower=1)
+    return df
+
 def calculate_hours_worked(start_time_str, end_time_str):
     try:
         start_dt = datetime.strptime(str(start_time_str), "%H:%M")
@@ -1481,12 +1532,16 @@ def load_custom_bookings(utente_id):
 
 
 def merge_booking_sources(base_df, custom_df):
+    base = ensure_booking_dataframe_columns(base_df) if base_df is not None else pd.DataFrame()
+    custom = ensure_booking_dataframe_columns(custom_df) if custom_df is not None else pd.DataFrame()
 
-    if base_df is None or len(base_df) == 0:
-        return custom_df.copy() if custom_df is not None else pd.DataFrame()
-    if custom_df is None or len(custom_df) == 0:
-        return base_df.copy()
-    return pd.concat([base_df.copy(), custom_df.copy()], ignore_index=True, sort=False)
+    if base.empty and custom.empty:
+        return ensure_booking_dataframe_columns(pd.DataFrame())
+    if base.empty:
+        return custom.copy()
+    if custom.empty:
+        return base.copy()
+    return ensure_booking_dataframe_columns(pd.concat([base, custom], ignore_index=True, sort=False))
 
 
 def sidebar_defaults():
@@ -1906,7 +1961,7 @@ def enrich_financials(
     selected_month=None,
     utente_id=None,
 ):
-    out = df.copy()
+    out = ensure_booking_dataframe_columns(df)
 
     # Postgres può restituire alcuni valori numerici come testo.
     # Li forziamo qui prima di fare moltiplicazioni/sottrazioni, così la dashboard non crasha.
@@ -1927,7 +1982,7 @@ def enrich_financials(
     check_out_dt = check_out_dt[valid_dates]
 
     if out.empty:
-        return out
+        return ensure_booking_dataframe_columns(out)
 
     out["check_in"] = check_in_dt.dt.date
     out["check_out"] = check_out_dt.dt.date
@@ -2078,6 +2133,7 @@ def month_stats(df, year, month):
 
 
 def annual_summary(df, year):
+    df = ensure_booking_dataframe_columns(df)
     valid = df[
         (df["status"].str.lower() != "cancelled")
         & (pd.to_datetime(df["check_in"]).dt.year == year)
@@ -2141,6 +2197,7 @@ def get_period_bounds(year, period_mode="Mensile", month=1, quarter=1, semester=
 
 
 def period_stats(df, start_date, end_date):
+    df = ensure_booking_dataframe_columns(df)
     active = df[
         (df["status"].str.lower() != "cancelled")
         & (hf_date_series(df["check_in"]) < hf_bound(end_date))
@@ -2310,6 +2367,7 @@ def period_slice(df, start_date, end_date):
 
 
 def period_stats(df, start_date, end_date):
+    df = ensure_booking_dataframe_columns(df)
     active = period_slice(df, start_date, end_date)
     days_in_period = max((end_date - start_date).days, 1)
 
@@ -3920,6 +3978,7 @@ if uploaded_file or not custom_bookings_df.empty:
             selected_month=selected_month,
             utente_id=st.session_state.utente["id"],
         )
+        df = ensure_booking_dataframe_columns(df)
         period_start, period_end, period_label = get_period_bounds(
             period_mode,
             selected_year,
