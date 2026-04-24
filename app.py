@@ -1359,31 +1359,9 @@ def load_message_settings(utente_id):
 
 def save_custom_booking(utente_id, data):
     """Salva una prenotazione custom e restituisce l'ID creato.
-    Versione robusta per Postgres/SQLite: valida i dati prima dell'insert e verifica che la riga sia stata creata.
+    Non usa fallback in sessione: la riga deve essere scritta davvero nel database.
     """
-    guest_name_clean = str(data.get("guest_name", "") or "").strip()
-    guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
-
-    if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
-        raise ValueError("Nome ospite non valido.")
-    if guest_phone_clean.lower() == "guest_phone":
-        guest_phone_clean = ""
-
-    check_in_value = hf_date(data.get("check_in"))
-    check_out_value = hf_date(data.get("check_out"))
-    if check_in_value is None or check_out_value is None:
-        raise ValueError("Date check-in/check-out non valide.")
-    if check_out_value <= check_in_value:
-        raise ValueError("Il check-out deve essere successivo al check-in.")
-
-    total_price_value = float(data.get("total_price", 0) or 0)
-    cleaning_cost_value = float(data.get("cleaning_cost", 0) or 0)
-    platform_fee_value = float(data.get("platform_fee", 0) or 0)
-    transaction_cost_value = float(data.get("transaction_cost", 0) or 0)
-    guests_value = max(1, int(data.get("guests", 1) or 1))
-    status_value = normalize_status(data.get("status", "confirmed") or "confirmed")
-    raw_status_value = str(data.get("raw_booking_status", status_value) or status_value)
-    notes_value = str(data.get("notes", "") or "")
+    payload = normalize_custom_booking_payload(data)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -1402,22 +1380,23 @@ def save_custom_booking(utente_id, data):
                 (
                     int(utente_id),
                     "Custom",
-                    guest_name_clean,
-                    guest_phone_clean,
-                    check_in_value.isoformat(),
-                    check_out_value.isoformat(),
-                    total_price_value,
-                    cleaning_cost_value,
-                    platform_fee_value,
-                    transaction_cost_value,
-                    raw_status_value,
-                    status_value,
-                    guests_value,
-                    notes_value,
+                    payload["guest_name"],
+                    payload["guest_phone"],
+                    payload["check_in"],
+                    payload["check_out"],
+                    payload["total_price"],
+                    payload["cleaning_cost"],
+                    payload["platform_fee"],
+                    payload["transaction_cost"],
+                    payload["raw_booking_status"],
+                    payload["status"],
+                    payload["guests"],
+                    payload["notes"],
                 ),
             )
             inserted = cur.fetchone()
-            new_id = inserted["id"] if inserted and "id" in inserted else None
+            inserted_dict = dict(inserted) if inserted else {}
+            new_id = inserted_dict.get("id")
         else:
             cur.execute(
                 """
@@ -1431,65 +1410,140 @@ def save_custom_booking(utente_id, data):
                 (
                     int(utente_id),
                     "Custom",
-                    guest_name_clean,
-                    guest_phone_clean,
-                    check_in_value.isoformat(),
-                    check_out_value.isoformat(),
-                    total_price_value,
-                    cleaning_cost_value,
-                    platform_fee_value,
-                    transaction_cost_value,
-                    raw_status_value,
-                    status_value,
-                    guests_value,
-                    notes_value,
+                    payload["guest_name"],
+                    payload["guest_phone"],
+                    payload["check_in"],
+                    payload["check_out"],
+                    payload["total_price"],
+                    payload["cleaning_cost"],
+                    payload["platform_fee"],
+                    payload["transaction_cost"],
+                    payload["raw_booking_status"],
+                    payload["status"],
+                    payload["guests"],
+                    payload["notes"],
                 ),
             )
             new_id = cur.lastrowid
 
+        if new_id is None:
+            raise RuntimeError("Il database non ha restituito l'ID della prenotazione custom.")
+
+        cur.execute(
+            "SELECT id FROM custom_bookings WHERE utente_id = ? AND id = ?",
+            (int(utente_id), int(new_id)),
+        )
+        if not cur.fetchone():
+            raise RuntimeError("La riga custom non è stata trovata subito dopo l'insert.")
+
         conn.commit()
-        return int(new_id) if new_id is not None else None
+        return int(new_id)
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
 
+def get_custom_booking_by_id(utente_id, booking_id):
+    """Legge una prenotazione custom direttamente dal database, senza filtri distruttivi."""
+    if booking_id is None:
+        return None
 
-def update_custom_booking(utente_id, booking_id, data):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE custom_bookings
-        SET guest_name = ?, guest_phone = ?, check_in = ?, check_out = ?, total_price = ?,
-            cleaning_cost = ?, platform_fee = ?, transaction_cost = ?,
-            raw_booking_status = ?, status = ?, guests = ?, notes = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND utente_id = ?
-        """,
-        (
-            str(data.get("guest_name", "") or "").strip(),
-            str(data.get("guest_phone", "") or "").strip(),
-            str(data.get("check_in", "")),
-            str(data.get("check_out", "")),
-            float(data.get("total_price", 0) or 0),
-            float(data.get("cleaning_cost", 0) or 0),
-            float(data.get("platform_fee", 0) or 0),
-            float(data.get("transaction_cost", 0) or 0),
-            str(data.get("raw_booking_status", "confirmed") or "confirmed"),
-            str(data.get("status", "confirmed") or "confirmed"),
-            int(data.get("guests", 1) or 1),
-            str(data.get("notes", "") or ""),
-            int(booking_id),
-            int(utente_id),
-        ),
-    )
-    conn.commit()
-    changed = cur.rowcount
-    conn.close()
-    return changed > 0
+    try:
+        cur.execute(
+            """
+            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                   cleaning_cost, platform_fee, transaction_cost, raw_booking_status, status, guests, notes
+            FROM custom_bookings
+            WHERE utente_id = ? AND id = ?
+            """,
+            (int(utente_id), int(booking_id)),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return dict(row)
+    finally:
+        conn.close()
 
+
+def normalize_custom_booking_payload(data):
+    guest_name_clean = str(data.get("guest_name", "") or "").strip()
+    guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
+
+    if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
+        raise ValueError("Nome ospite non valido.")
+    if guest_phone_clean.lower() == "guest_phone":
+        guest_phone_clean = ""
+
+    check_in_value = hf_date(data.get("check_in"))
+    check_out_value = hf_date(data.get("check_out"))
+    if check_in_value is None or check_out_value is None:
+        raise ValueError("Date check-in/check-out non valide.")
+    if check_out_value <= check_in_value:
+        raise ValueError("Il check-out deve essere successivo al check-in.")
+
+    status_value = normalize_status(data.get("status", "confirmed") or "confirmed")
+    raw_status_value = str(data.get("raw_booking_status", status_value) or status_value)
+
+    return {
+        "guest_name": guest_name_clean,
+        "guest_phone": guest_phone_clean,
+        "check_in": check_in_value.isoformat(),
+        "check_out": check_out_value.isoformat(),
+        "total_price": float(data.get("total_price", 0) or 0),
+        "cleaning_cost": float(data.get("cleaning_cost", 0) or 0),
+        "platform_fee": float(data.get("platform_fee", 0) or 0),
+        "transaction_cost": float(data.get("transaction_cost", 0) or 0),
+        "raw_booking_status": raw_status_value,
+        "status": status_value,
+        "guests": max(1, int(data.get("guests", 1) or 1)),
+        "notes": str(data.get("notes", "") or ""),
+    }
+
+
+def update_custom_booking(utente_id, booking_id, data):
+    payload = normalize_custom_booking_payload(data)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE custom_bookings
+            SET guest_name = ?, guest_phone = ?, check_in = ?, check_out = ?, total_price = ?,
+                cleaning_cost = ?, platform_fee = ?, transaction_cost = ?,
+                raw_booking_status = ?, status = ?, guests = ?, notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND utente_id = ?
+            """,
+            (
+                payload["guest_name"],
+                payload["guest_phone"],
+                payload["check_in"],
+                payload["check_out"],
+                payload["total_price"],
+                payload["cleaning_cost"],
+                payload["platform_fee"],
+                payload["transaction_cost"],
+                payload["raw_booking_status"],
+                payload["status"],
+                payload["guests"],
+                payload["notes"],
+                int(booking_id),
+                int(utente_id),
+            ),
+        )
+        changed = cur.rowcount
+        conn.commit()
+        return changed > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def delete_custom_booking(utente_id, booking_id):
     conn = get_conn()
@@ -1508,11 +1562,10 @@ def delete_custom_booking(utente_id, booking_id):
 
     if row:
         try:
-            row_dict = dict(row)
-            platform = str(row_dict.get("platform", "Custom") or "Custom")
-            guest_name = str(row_dict.get("guest_name", "") or "").strip()
-            check_in = pd.to_datetime(row_dict.get("check_in"), errors="coerce")
-            check_out = pd.to_datetime(row_dict.get("check_out"), errors="coerce")
+            platform = str(row.get("platform", "Custom") or "Custom")
+            guest_name = str(row.get("guest_name", "") or "").strip()
+            check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
+            check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
             if guest_name and pd.notna(check_in) and pd.notna(check_out):
                 booking_ref_pipe = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
                 booking_ref_bars = f"{platform}||{guest_name}||{check_in.date().isoformat()}||{check_out.date().isoformat()}"
@@ -1558,8 +1611,7 @@ def cleanup_bad_custom_bookings(utente_id):
 
 
 def load_custom_bookings(utente_id):
-    cleanup_bad_custom_bookings(utente_id)
-
+    # Lettura non distruttiva: non cancelliamo righe dal database mentre carichiamo la tabella.
     conn = get_conn()
     query = """
         SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
@@ -1569,7 +1621,8 @@ def load_custom_bookings(utente_id):
         WHERE utente_id = ?
         ORDER BY check_in ASC, id ASC
     """
-    df = pd.read_sql_query(query, conn, params=(int(utente_id),))
+    query_to_run = query.replace("?", "%s") if USE_POSTGRES else query
+    df = pd.read_sql_query(query_to_run, conn, params=(int(utente_id),))
     conn.close()
 
     if df.empty:
@@ -2716,14 +2769,8 @@ def build_scheduled_messages_for_booking(row, profilo, scheduling_rules=None, te
     guest_name = str(row.get("guest_name", "") or "").strip() or "Ospite"
     guest_phone = str(row.get("guest_phone", "") or "").strip()
     platform = str(row.get("platform", "") or "").strip() or "Booking"
-
-    check_in_ts = pd.to_datetime(row.get("check_in"), errors="coerce")
-    check_out_ts = pd.to_datetime(row.get("check_out"), errors="coerce")
-    if pd.isna(check_in_ts) or pd.isna(check_out_ts) or check_out_ts <= check_in_ts:
-        return []
-
-    check_in = check_in_ts.to_pydatetime()
-    check_out = check_out_ts.to_pydatetime()
+    check_in = pd.to_datetime(row.get("check_in")).to_pydatetime()
+    check_out = pd.to_datetime(row.get("check_out")).to_pydatetime()
 
     booking_ref = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
 
@@ -3249,7 +3296,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.success("Layout tabella ripristinato.")
             st.rerun()
 
-    custom_bookings_df = load_custom_bookings(user_id)
+    custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
     if st.session_state.get("custom_booking_saved_ok"):
         st.success(st.session_state.pop("custom_booking_saved_ok"))
 
@@ -3295,13 +3342,10 @@ def render_dashboard_dataframe(df_to_show, user_id):
                         "notes": custom_notes,
                     }
                     new_custom_id = save_custom_booking(user_id, custom_payload)
-                    reloaded_custom_df = load_custom_bookings(user_id)
-                    saved_ids = []
-                    if not reloaded_custom_df.empty and "id" in reloaded_custom_df.columns:
-                        saved_ids = pd.to_numeric(reloaded_custom_df["id"], errors="coerce").dropna().astype(int).tolist()
+                    saved_row = get_custom_booking_by_id(user_id, new_custom_id)
 
-                    if new_custom_id is None or int(new_custom_id) not in saved_ids:
-                        st.error("La prenotazione non risulta salvata nel database dopo il salvataggio. Riprova e, se persiste, verifica DATABASE_URL/Postgres su Render.")
+                    if saved_row is None:
+                        st.error("La prenotazione è stata inviata al database, ma non risulta rileggibile. Controlla DATABASE_URL/Postgres su Render.")
                     else:
                         st.session_state.pop("last_saved_custom_booking_payload", None)
                         st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
@@ -3373,20 +3417,14 @@ def render_dashboard_dataframe(df_to_show, user_id):
                             },
                         )
                         if ok:
-                            st.session_state.pop("last_saved_custom_booking_payload", None)
                             st.success("Prenotazione custom aggiornata.")
                             st.rerun()
-                        else:
-                            st.error("Non sono riuscita ad aggiornare la prenotazione custom nel database.")
             with ea2:
                 if st.button("Elimina prenotazione custom", use_container_width=True, key=f"delete_custom_booking_button_{selected_custom_id}"):
                     ok = delete_custom_booking(user_id, selected_custom_id)
                     if ok:
-                        st.session_state.pop("last_saved_custom_booking_payload", None)
                         st.success("Prenotazione custom eliminata.")
                         st.rerun()
-                    else:
-                        st.error("Non sono riuscita a eliminare la prenotazione custom dal database.")
 
 
     visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
@@ -4133,7 +4171,7 @@ filtered_df = None
 stats = None
 annual = None
 
-custom_bookings_df = load_custom_bookings(st.session_state.utente["id"])
+custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(st.session_state.utente["id"]))
 
 if uploaded_file or not custom_bookings_df.empty:
     try:
