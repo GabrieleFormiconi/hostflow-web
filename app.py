@@ -1495,11 +1495,34 @@ def delete_custom_booking(utente_id, booking_id):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
+        "SELECT platform, guest_name, check_in, check_out FROM custom_bookings WHERE id = ? AND utente_id = ?",
+        (int(booking_id), int(utente_id)),
+    )
+    row = cur.fetchone()
+
+    cur.execute(
         "DELETE FROM custom_bookings WHERE id = ? AND utente_id = ?",
         (int(booking_id), int(utente_id)),
     )
-    conn.commit()
     changed = cur.rowcount
+
+    if row:
+        try:
+            platform = str(row.get("platform", "Custom") or "Custom")
+            guest_name = str(row.get("guest_name", "") or "").strip()
+            check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
+            check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
+            if guest_name and pd.notna(check_in) and pd.notna(check_out):
+                booking_ref_pipe = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
+                booking_ref_bars = f"{platform}||{guest_name}||{check_in.date().isoformat()}||{check_out.date().isoformat()}"
+                cur.execute(
+                    "DELETE FROM scheduled_messages WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
+                    (int(utente_id), booking_ref_pipe, booking_ref_bars),
+                )
+        except Exception:
+            pass
+
+    conn.commit()
     conn.close()
     return changed > 0
 
@@ -2974,6 +2997,14 @@ def load_scheduled_messages(utente_id):
     """
     df = pd.read_sql_query(query, conn, params=(utente_id,))
     conn.close()
+
+    if not df.empty:
+        df = df.copy()
+        check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
+        check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
+        send_at_dt = pd.to_datetime(df.get("send_at"), errors="coerce")
+        clean_mask = check_in_dt.notna() & check_out_dt.notna() & send_at_dt.notna()
+        df = df[clean_mask].copy()
     return df
 
 
@@ -3122,6 +3153,19 @@ def date_value_safe(value, fallback=None):
         return dt.date()
     except Exception:
         return fallback
+
+
+def booking_key_safe(row):
+    """Crea una chiave prenotazione solo se le date sono valide."""
+    try:
+        guest = str(row.get("guest_name", "") or "").strip().lower()
+        check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
+        check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
+        if not guest or pd.isna(check_in) or pd.isna(check_out):
+            return ""
+        return f"{guest}|{check_in.date()}|{check_out.date()}"
+    except Exception:
+        return ""
 
 
 def render_dashboard_dataframe(df_to_show, user_id):
@@ -4548,20 +4592,8 @@ if "messaggi" in tab_map:
             auto_messages_signature_key = f"scheduled_messages_bookings_signature_{st.session_state.utente['id']}"
             current_bookings_signature = build_bookings_auto_signature(df)
 
-            if (
-                not needs_regeneration
-                and st.session_state.get(auto_messages_signature_key) != current_bookings_signature
-            ):
-                replace_scheduled_messages_for_user(
-                    st.session_state.utente["id"],
-                    df,
-                    profilo,
-                    scheduling_rules=scheduling_rules,
-                    template_base=template_base,
-                )
-                st.session_state[auto_messages_signature_key] = current_bookings_signature
-                st.session_state["selected_scheduled_message_id"] = None
-                st.rerun()
+            # Non rigeneriamo automaticamente i messaggi a ogni modifica prenotazione.
+            # Evita il doppio caricamento: i messaggi si aggiornano dal bottone dedicato.
 
             if generate_clicked:
                 for editor_key, persistent_key in template_editor_map.items():
@@ -4617,18 +4649,14 @@ if "messaggi" in tab_map:
             valid = df[df["status"].str.lower() != "cancelled"].sort_values("check_in")
 
             if not scheduled_df.empty:
-                valid_keys = set(
-                    valid.apply(
-                        lambda r: f"{str(r.get('guest_name', '')).strip().lower()}|{pd.to_datetime(r.get('check_in')).date()}|{pd.to_datetime(r.get('check_out')).date()}",
-                        axis=1,
-                    )
-                )
+                valid_keys = set(valid.apply(booking_key_safe, axis=1))
+                valid_keys.discard("")
                 scheduled_df = scheduled_df.copy()
-                scheduled_df["booking_key"] = scheduled_df.apply(
-                    lambda r: f"{str(r.get('guest_name', '')).strip().lower()}|{pd.to_datetime(r.get('check_in')).date()}|{pd.to_datetime(r.get('check_out')).date()}",
-                    axis=1,
-                )
-                scheduled_df = scheduled_df[scheduled_df["booking_key"].isin(valid_keys)].copy()
+                scheduled_df["booking_key"] = scheduled_df.apply(booking_key_safe, axis=1)
+                scheduled_df = scheduled_df[
+                    scheduled_df["booking_key"].ne("")
+                    & scheduled_df["booking_key"].isin(valid_keys)
+                ].copy()
                 scheduled_df = scheduled_df.drop(columns=["booking_key"], errors="ignore")
             if len(valid) == 0:
                 st.warning(TESTI["messaggi_nessuna_prenotazione"])
