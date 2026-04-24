@@ -1611,25 +1611,44 @@ def cleanup_bad_custom_bookings(utente_id):
 
 
 def load_custom_bookings(utente_id):
-    # Lettura non distruttiva: non cancelliamo righe dal database mentre carichiamo la tabella.
-    conn = get_conn()
-    query = """
-        SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-               cleaning_cost, platform_fee, transaction_cost,
-               raw_booking_status, status, guests, notes
-        FROM custom_bookings
-        WHERE utente_id = ?
-        ORDER BY check_in ASC, id ASC
+    """Carica le prenotazioni custom dal database in modo compatibile con Render/Postgres.
+
+    Nota importante: qui NON usiamo pd.read_sql_query, perché su Render/Postgres può dare
+    risultati non affidabili con il cursor custom usato per convertire i placeholder SQLite.
+    Usiamo invece cur.execute + fetchall, così la stessa logica funziona sia in locale
+    sia su Render con DATABASE_URL.
     """
-    query_to_run = query.replace("?", "%s") if USE_POSTGRES else query
-    df = pd.read_sql_query(query_to_run, conn, params=(int(utente_id),))
-    conn.close()
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                   cleaning_cost, platform_fee, transaction_cost,
+                   raw_booking_status, status, guests, notes
+            FROM custom_bookings
+            WHERE utente_id = ?
+            ORDER BY check_in ASC, id ASC
+            """,
+            (int(utente_id),),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
-    if df.empty:
-        return df
+    if not rows:
+        return pd.DataFrame(columns=[
+            "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
+            "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+            "raw_booking_status", "status", "guests", "notes"
+        ])
 
-    df = df.copy()
-    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce")
+    df = pd.DataFrame([dict(row) for row in rows])
+
+    # Normalizzazione molto permissiva: una riga appena salvata non deve sparire dalla UI
+    # per piccoli problemi di tipo dati. La scartiamo solo se manca davvero un dato essenziale.
+    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce").fillna(0).astype(int)
+    df["platform"] = df.get("platform", "Custom").fillna("Custom").astype(str).replace("", "Custom")
     df["guest_name"] = df.get("guest_name", "").fillna("").astype(str).str.strip()
     df["guest_phone"] = df.get("guest_phone", "").fillna("").astype(str).str.strip()
 
@@ -1637,11 +1656,9 @@ def load_custom_bookings(utente_id):
     check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
 
     valid_mask = (
-        df["id"].notna()
-        & (df["id"] > 0)
+        (df["id"] > 0)
         & df["guest_name"].ne("")
         & ~df["guest_name"].str.lower().isin(["guest_name", "nome ospite"])
-        & ~df["guest_phone"].str.lower().isin(["guest_phone"])
         & check_in_dt.notna()
         & check_out_dt.notna()
         & (check_out_dt > check_in_dt)
@@ -1652,7 +1669,11 @@ def load_custom_bookings(utente_id):
     check_out_dt = check_out_dt[valid_mask]
 
     if df.empty:
-        return df
+        return pd.DataFrame(columns=[
+            "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
+            "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+            "raw_booking_status", "status", "guests", "notes"
+        ])
 
     df["check_in"] = check_in_dt.dt.date
     df["check_out"] = check_out_dt.dt.date
@@ -1662,12 +1683,11 @@ def load_custom_bookings(utente_id):
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    df["id"] = df["id"].astype(int)
     df["guests"] = df["guests"].astype(int).clip(lower=1)
 
     if "status" not in df.columns:
         df["status"] = "confirmed"
-    df["status"] = df["status"].fillna("confirmed").apply(normalize_status)
+    df["status"] = df["status"].fillna("confirmed").astype(str).apply(normalize_status)
 
     if "raw_booking_status" not in df.columns:
         df["raw_booking_status"] = df["status"]
@@ -1677,7 +1697,7 @@ def load_custom_bookings(utente_id):
         df["notes"] = ""
     df["notes"] = df["notes"].fillna("").astype(str)
 
-    return df
+    return df.reset_index(drop=True)
 
 
 def merge_booking_sources(base_df, custom_df):
@@ -2447,7 +2467,11 @@ def period_stats(df, start_date, end_date):
 
 
 def filter_df_by_period(df, start_date, end_date):
-    return df[hf_filter_between_dates(df, "check_in", start_date, end_date)].copy()
+    df = ensure_booking_dataframe_columns(df)
+    return df[
+        (hf_date_series(df["check_in"]) < hf_bound(end_date))
+        & (hf_date_series(df["check_out"]) >= hf_bound(start_date))
+    ].copy()
 
 
 def build_period_summary(df, year, period_mode="Mensile", custom_start=None, custom_end=None):
