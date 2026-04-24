@@ -1806,6 +1806,24 @@ def inizializza_sidebar_state(utente_id):
             st.session_state[key] = value
 
 
+def apply_pending_dashboard_period_from_custom_save():
+    """Dopo il salvataggio di una custom booking, porta la dashboard sul mese della prenotazione."""
+    pending = st.session_state.pop("pending_custom_booking_period", None)
+    if not isinstance(pending, dict):
+        return
+    try:
+        target_year = int(pending.get("year"))
+        target_month = int(pending.get("month"))
+    except Exception:
+        return
+    if target_year < 2024 or target_year > 2035 or target_month < 1 or target_month > 12:
+        return
+    st.session_state["dashboard_period_mode"] = "Mensile"
+    st.session_state["selected_year"] = target_year
+    st.session_state["selected_month"] = target_month
+    st.session_state["selected_month_initialized"] = True
+
+
 def inizializza_sessione():
     if "utente" not in st.session_state:
         st.session_state.utente = None
@@ -3296,7 +3314,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.success("Layout tabella ripristinato.")
             st.rerun()
 
-    custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
+    custom_bookings_df = load_custom_bookings(user_id)
     if st.session_state.get("custom_booking_saved_ok"):
         st.success(st.session_state.pop("custom_booking_saved_ok"))
 
@@ -3347,8 +3365,25 @@ def render_dashboard_dataframe(df_to_show, user_id):
                     if saved_row is None:
                         st.error("La prenotazione è stata inviata al database, ma non risulta rileggibile. Controlla DATABASE_URL/Postgres su Render.")
                     else:
+                        check_in_saved = hf_date(saved_row.get("check_in")) or custom_check_in
+
+                        merged_settings = carica_sidebar_settings(user_id)
+                        merged_settings.update({
+                            "dashboard_period_mode": "Mensile",
+                            "selected_year": int(check_in_saved.year),
+                            "selected_month": int(check_in_saved.month),
+                        })
+                        salva_sidebar_settings(user_id, merged_settings)
+
                         st.session_state.pop("last_saved_custom_booking_payload", None)
-                        st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
+                        st.session_state["pending_custom_booking_period"] = {
+                            "year": int(check_in_saved.year),
+                            "month": int(check_in_saved.month),
+                        }
+                        st.session_state["custom_booking_saved_ok"] = (
+                            f"Prenotazione custom salvata correttamente (ID {new_custom_id}). "
+                            f"Dashboard aggiornata su {check_in_saved.strftime('%B %Y')}."
+                        )
                         st.rerun()
                 except Exception as exc:
                     st.error(f"Errore salvataggio prenotazione custom: {exc}")
@@ -3431,6 +3466,15 @@ def render_dashboard_dataframe(df_to_show, user_id):
     visible_columns = [col for col in visible_columns if col in all_columns]
     if not visible_columns:
         visible_columns = saved_visible_columns.copy() if saved_visible_columns else all_columns.copy()
+
+    if df_to_show.empty:
+        all_custom_bookings_for_user = load_custom_bookings(user_id)
+        if not all_custom_bookings_for_user.empty:
+            st.info(
+                "La tabella sotto segue il periodo selezionato. "
+                "Hai prenotazioni custom salvate, ma nessuna rientra nel periodo attuale: "
+                "apri 'Aggiungi prenotazione custom' oppure cambia mese/periodo dalla sidebar."
+            )
 
     st.dataframe(df_to_show[visible_columns], width="stretch")
 
@@ -3944,6 +3988,7 @@ if st.session_state.utente is None:
 profilo = st.session_state.profilo_immobile or carica_profilo_immobile(st.session_state.utente["id"])
 st.session_state.profilo_immobile = profilo
 inizializza_sidebar_state(st.session_state.utente["id"])
+apply_pending_dashboard_period_from_custom_save()
 st.session_state.cleaning_cost_default = 0.0
 st.session_state.monthly_cleaning_cost = 0.0
 
@@ -4171,7 +4216,7 @@ filtered_df = None
 stats = None
 annual = None
 
-custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(st.session_state.utente["id"]))
+custom_bookings_df = load_custom_bookings(st.session_state.utente["id"])
 
 if uploaded_file or not custom_bookings_df.empty:
     try:
