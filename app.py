@@ -24,8 +24,6 @@ from datetime import date, timedelta, datetime
 import pandas as pd
 import streamlit as st
 
-USE_POSTGRES = True
-
 
 try:
     from dotenv import load_dotenv
@@ -34,6 +32,10 @@ except Exception:
     pass
 
 from pricing_service import run_pricing_analysis
+
+
+def send_whatsapp_message(phone_number, message_text):
+    return False, "WhatsApp Web disattivato: integrazione Cloud API in preparazione"
 
 
 # ---------------------------
@@ -1292,6 +1294,13 @@ def load_message_settings(utente_id):
 
 
 def save_custom_booking(utente_id, data):
+    guest_name_clean = str(data.get("guest_name", "") or "").strip()
+    guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
+    if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
+        raise ValueError("Nome ospite non valido.")
+    if guest_phone_clean.lower() == "guest_phone":
+        guest_phone_clean = ""
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -1306,8 +1315,8 @@ def save_custom_booking(utente_id, data):
         (
             int(utente_id),
             "Custom",
-            str(data.get("guest_name", "") or "").strip(),
-            str(data.get("guest_phone", "") or "").strip(),
+            guest_name_clean,
+            guest_phone_clean,
             str(data.get("check_in", "")),
             str(data.get("check_out", "")),
             float(data.get("total_price", 0) or 0),
@@ -1372,7 +1381,38 @@ def delete_custom_booking(utente_id, booking_id):
     return changed > 0
 
 
+def cleanup_bad_custom_bookings(utente_id):
+    """Elimina righe sporche create durante test/migrazione Postgres."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            DELETE FROM custom_bookings
+            WHERE utente_id = ?
+              AND (
+                    guest_name IS NULL
+                 OR TRIM(guest_name) = ''
+                 OR LOWER(TRIM(guest_name)) IN ('guest_name', 'nome ospite')
+                 OR LOWER(TRIM(COALESCE(guest_phone, ''))) = 'guest_phone'
+                 OR check_in IS NULL
+                 OR check_out IS NULL
+                 OR TRIM(CAST(check_in AS TEXT)) = ''
+                 OR TRIM(CAST(check_out AS TEXT)) = ''
+              )
+            """,
+            (int(utente_id),),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def load_custom_bookings(utente_id):
+    cleanup_bad_custom_bookings(utente_id)
+
     conn = get_conn()
     query = """
         SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
@@ -1380,7 +1420,7 @@ def load_custom_bookings(utente_id):
                raw_booking_status, status, guests, notes
         FROM custom_bookings
         WHERE utente_id = ?
-        ORDER BY date(check_in) ASC, id ASC
+        ORDER BY check_in ASC, id ASC
     """
     df = pd.read_sql_query(query, conn, params=(int(utente_id),))
     conn.close()
@@ -1388,42 +1428,55 @@ def load_custom_bookings(utente_id):
     if df.empty:
         return df
 
-    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
-    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
-    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["id"] = df["id"].astype(int)
-    df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].apply(normalize_status)
-    if "raw_booking_status" not in df.columns:
-        df["raw_booking_status"] = df["status"]
-    if "guest_phone" not in df.columns:
-        df["guest_phone"] = ""
-    df["guest_phone"] = df["guest_phone"].fillna("").astype(str)
-    return df
+    df = df.copy()
+    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce")
+    df["guest_name"] = df.get("guest_name", "").fillna("").astype(str).str.strip()
+    df["guest_phone"] = df.get("guest_phone", "").fillna("").astype(str).str.strip()
 
-    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
-    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
-    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["id"] = df["id"].astype(int)
-    df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].apply(normalize_status)
-    if "raw_booking_status" not in df.columns:
-        df["raw_booking_status"] = df["status"]
-    if "guest_phone" not in df.columns:
-        df["guest_phone"] = ""
-    return df
+    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
+    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
 
-    df["check_in"] = pd.to_datetime(df["check_in"], errors="coerce").dt.date
-    df["check_out"] = pd.to_datetime(df["check_out"], errors="coerce").dt.date
-    for col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+    valid_mask = (
+        df["id"].notna()
+        & (df["id"] > 0)
+        & df["guest_name"].ne("")
+        & ~df["guest_name"].str.lower().isin(["guest_name", "nome ospite"])
+        & ~df["guest_phone"].str.lower().isin(["guest_phone"])
+        & check_in_dt.notna()
+        & check_out_dt.notna()
+        & (check_out_dt > check_in_dt)
+    )
+
+    df = df[valid_mask].copy()
+    check_in_dt = check_in_dt[valid_mask]
+    check_out_dt = check_out_dt[valid_mask]
+
+    if df.empty:
+        return df
+
+    df["check_in"] = check_in_dt.dt.date
+    df["check_out"] = check_out_dt.dt.date
+
+    for col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        if col not in df.columns:
+            df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
     df["id"] = df["id"].astype(int)
     df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].apply(normalize_status)
+
+    if "status" not in df.columns:
+        df["status"] = "confirmed"
+    df["status"] = df["status"].fillna("confirmed").apply(normalize_status)
+
     if "raw_booking_status" not in df.columns:
         df["raw_booking_status"] = df["status"]
+    df["raw_booking_status"] = df["raw_booking_status"].fillna(df["status"]).astype(str)
+
+    if "notes" not in df.columns:
+        df["notes"] = ""
+    df["notes"] = df["notes"].fillna("").astype(str)
+
     return df
 
 
