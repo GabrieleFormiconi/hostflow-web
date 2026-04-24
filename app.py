@@ -987,10 +987,23 @@ def crea_sessione_accesso(utente_id):
 
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO sessioni_accesso (token, utente_id, expires_at) VALUES (?, ?, ?)",
-        (token, utente_id, expires_at),
-    )
+    if USE_POSTGRES:
+        cur.execute(
+            """
+            INSERT INTO sessioni_accesso (token, utente_id, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET
+                utente_id = excluded.utente_id,
+                expires_at = excluded.expires_at,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (token, utente_id, expires_at),
+        )
+    else:
+        cur.execute(
+            "INSERT OR REPLACE INTO sessioni_accesso (token, utente_id, expires_at) VALUES (?, ?, ?)",
+            (token, utente_id, expires_at),
+        )
     conn.commit()
     conn.close()
     return token
