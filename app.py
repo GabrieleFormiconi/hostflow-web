@@ -2137,6 +2137,17 @@ def load_data(uploaded_file, cleaning_cost_default, import_mode):
     raise ValueError("Formato non supportato. Usa CSV, XLS o XLSX.")
 
 
+@st.cache_data(show_spinner=False)
+def load_data_cached(file_bytes, file_name, cleaning_cost_default, import_mode):
+    """Cache solo per parsing file: evita di rileggere CSV/Excel a ogni rerun Streamlit.
+    Non cambia la logica dei dati: ricostruisce lo stesso buffer e chiama load_data().
+    """
+    buffer = BytesIO(file_bytes)
+    buffer.name = file_name or "prenotazioni.xlsx"
+    buffer.seek(0)
+    return load_data(buffer, cleaning_cost_default, import_mode)
+
+
 def get_weekend_days(mode):
     if mode == "Ven-Sab-Dom":
         return {4, 5, 6}
@@ -4087,7 +4098,6 @@ with st.sidebar:
             st.session_state.file_prenotazioni_virtuale = buffer_file
             st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
             st.session_state.file_prenotazioni_signature = uploaded_signature
-            st.rerun()
 
     uploaded_file = st.session_state.get("file_prenotazioni_virtuale")
 
@@ -4273,7 +4283,13 @@ if uploaded_file or not custom_bookings_df.empty:
         if uploaded_file:
             if hasattr(uploaded_file, "seek"):
                 uploaded_file.seek(0)
-            raw_df = load_data(uploaded_file, cleaning_cost_default, import_mode)
+            file_bytes = uploaded_file.getvalue()
+            raw_df = load_data_cached(
+                file_bytes,
+                getattr(uploaded_file, "name", "prenotazioni.xlsx"),
+                float(cleaning_cost_default),
+                import_mode,
+            ).copy()
 
         merged_raw_df = merge_booking_sources(raw_df, custom_bookings_df)
         df = enrich_financials(
