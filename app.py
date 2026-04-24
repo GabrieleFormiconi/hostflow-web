@@ -1907,7 +1907,31 @@ def enrich_financials(
     utente_id=None,
 ):
     out = df.copy()
-    out["nights"] = (pd.to_datetime(out["check_out"]) - pd.to_datetime(out["check_in"])).dt.days.clip(lower=1)
+
+    # Postgres può restituire alcuni valori numerici come testo.
+    # Li forziamo qui prima di fare moltiplicazioni/sottrazioni, così la dashboard non crasha.
+    for numeric_col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        if numeric_col not in out.columns:
+            out[numeric_col] = 0
+        out[numeric_col] = pd.to_numeric(out[numeric_col], errors="coerce").fillna(0)
+
+    out["guests"] = out["guests"].astype(int).clip(lower=1)
+    out["status"] = out.get("status", "confirmed").fillna("confirmed").astype(str).apply(normalize_status)
+    out["platform"] = out.get("platform", "").fillna("").astype(str)
+
+    check_in_dt = pd.to_datetime(out["check_in"], errors="coerce")
+    check_out_dt = pd.to_datetime(out["check_out"], errors="coerce")
+    valid_dates = check_in_dt.notna() & check_out_dt.notna() & (check_out_dt > check_in_dt)
+    out = out[valid_dates].copy()
+    check_in_dt = check_in_dt[valid_dates]
+    check_out_dt = check_out_dt[valid_dates]
+
+    if out.empty:
+        return out
+
+    out["check_in"] = check_in_dt.dt.date
+    out["check_out"] = check_out_dt.dt.date
+    out["nights"] = (check_out_dt - check_in_dt).dt.days.clip(lower=1)
 
     if include_city_tax:
         out["city_tax"] = (out["guests"] * out["nights"] * float(city_tax_rate)).round(2)
