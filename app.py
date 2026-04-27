@@ -3544,7 +3544,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
                 salva_sidebar_settings(user_id, merged_settings)
                 st.session_state[manager_key] = False
                 st.success("Layout tabella salvato.")
-                st.rerun()
+                # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
         if reset_layout_clicked:
             merged_settings = carica_sidebar_settings(user_id)
@@ -3554,7 +3554,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.session_state[selector_key] = all_columns.copy()
             st.session_state[manager_key] = False
             st.success("Layout tabella ripristinato.")
-            st.rerun()
+            # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
     custom_bookings_df = load_custom_bookings(user_id)
     if st.session_state.get("custom_booking_saved_ok"):
@@ -3626,7 +3626,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
                             f"Prenotazione custom salvata correttamente (ID {new_custom_id}). "
                             f"Dashboard aggiornata su {check_in_saved.strftime('%B %Y')}."
                         )
-                        st.rerun()
+                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
                 except Exception as exc:
                     st.error(f"Errore salvataggio prenotazione custom: {exc}")
 
@@ -3695,13 +3695,13 @@ def render_dashboard_dataframe(df_to_show, user_id):
                         )
                         if ok:
                             st.success("Prenotazione custom aggiornata.")
-                            st.rerun()
+                            # st.rerun() rimosso: il click del widget fa già un rerun automatico
             with ea2:
                 if st.button("Elimina prenotazione custom", use_container_width=True, key=f"delete_custom_booking_button_{selected_custom_id}"):
                     ok = delete_custom_booking(user_id, selected_custom_id)
                     if ok:
                         st.success("Prenotazione custom eliminata.")
-                        st.rerun()
+                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
 
     visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
@@ -4287,7 +4287,7 @@ with st.sidebar:
             st.session_state.file_prenotazioni_virtuale = buffer_file
             st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
             st.session_state.file_prenotazioni_signature = uploaded_signature
-            st.rerun()
+            # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
     uploaded_file = st.session_state.get("file_prenotazioni_virtuale")
 
@@ -5245,7 +5245,7 @@ if "messaggi" in tab_map:
                                                 st.success("Messaggio rimesso in attesa di invio.")
 
 
-                                                st.rerun()
+                                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
 
                                     with action2:
@@ -5281,7 +5281,7 @@ if "messaggi" in tab_map:
                                                 st.info("Messaggio annullato.")
 
 
-                                                st.rerun()
+                                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
 
                                 elif status_value == "cancelled":
@@ -5317,7 +5317,7 @@ if "messaggi" in tab_map:
                                             st.success("Messaggio ripristinato.")
 
 
-                                            st.rerun()
+                                            # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
 
                                 elif status_value == "sent":
@@ -5362,7 +5362,7 @@ if "messaggi" in tab_map:
                                             st.info("Messaggio annullato.")
 
 
-                                            st.rerun()
+                                            # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
 if "pulizie_servizi" in tab_map:
     with tab_map["pulizie_servizi"]:
@@ -5554,7 +5554,7 @@ if "pulizie_servizi" in tab_map:
                         st.error("Il servizio pulizia non risulta rileggibile dal database dopo il salvataggio.")
                     else:
                         st.success(f"Servizio pulizia salvato correttamente (ID {new_cleaning_id}).")
-                        st.rerun()
+                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
                 except Exception as exc:
                     st.error(f"Errore salvataggio servizio pulizia: {exc}")
 
@@ -5589,7 +5589,7 @@ if "pulizie_servizi" in tab_map:
                     if st.button("Azzera tutto il registro pulizie", use_container_width=True, key="delete_all_cleaning_services_button"):
                         deleted_rows = delete_all_cleaning_services(st.session_state.utente["id"])
                         st.success(f"Registro pulizie azzerato. Record eliminati: {deleted_rows}")
-                        st.rerun()
+                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
                 selected_cleaning_row = cleaning_df[cleaning_df["id"] == int(selected_cleaning_id)].iloc[0]
 
@@ -5730,13 +5730,13 @@ if "pulizie_servizi" in tab_map:
                             )
                             if updated:
                                 st.success("Servizio pulizia aggiornato.")
-                                st.rerun()
+                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
                     with edit_action2:
                         if st.button("Elimina servizio selezionato", use_container_width=True, key=f"delete_cleaning_service_button_{int(selected_cleaning_id)}"):
                             deleted = delete_cleaning_service(st.session_state.utente["id"], int(selected_cleaning_id))
                             if deleted:
                                 st.success("Servizio pulizia eliminato.")
-                                st.rerun()
+                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
 
             
 

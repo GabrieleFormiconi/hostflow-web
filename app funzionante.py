@@ -534,54 +534,243 @@ def calculate_cleaning_total(hours_worked, hourly_rate, extra_cost=0.0, custom_t
     return round((float(hours_worked) * float(hourly_rate)) + float(extra_cost), 2)
 
 
-def save_cleaning_service(utente_id, data):
+def get_cleaning_service_by_id(utente_id, service_id):
+    """Rilegge un servizio pulizia direttamente dal DB dopo il salvataggio."""
+    if service_id is None:
+        return None
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO cleaning_services (
-            utente_id, service_date, booking_ref, guest_name, service_type, cleaner_name,
-            start_time, end_time, hours_worked, hourly_rate, extra_cost,
-            custom_total_override, total_cost, payment_status, notes, updated_at
+    try:
+        cur.execute(
+            """
+            SELECT id, service_date, booking_ref, guest_name, service_type, cleaner_name,
+                   start_time, end_time, hours_worked, hourly_rate, extra_cost,
+                   custom_total_override, total_cost, payment_status, notes, created_at
+            FROM cleaning_services
+            WHERE utente_id = ? AND id = ?
+            """,
+            (int(utente_id), int(service_id)),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """,
-        (
-            int(utente_id),
-            str(data.get("service_date", "")),
-            str(data.get("booking_ref", "") or ""),
-            str(data.get("guest_name", "") or ""),
-            str(data.get("service_type", "check_out") or "check_out"),
-            str(data.get("cleaner_name", "") or ""),
-            str(data.get("start_time", "") or ""),
-            str(data.get("end_time", "") or ""),
-            float(data.get("hours_worked", 0) or 0),
-            float(data.get("hourly_rate", 0) or 0),
-            float(data.get("extra_cost", 0) or 0),
-            (None if data.get("custom_total_override", None) in [None, ""] else float(data.get("custom_total_override"))),
-            float(data.get("total_cost", 0) or 0),
-            str(data.get("payment_status", "Da pagare") or "Da pagare"),
-            str(data.get("notes", "") or ""),
-        ),
-    )
-    conn.commit()
-    conn.close()
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
+
+def save_cleaning_service(utente_id, data):
+    """Salva un servizio pulizia e verifica che sia davvero persistito nel DB."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if USE_POSTGRES:
+            cur.execute(
+                """
+                INSERT INTO cleaning_services (
+                    utente_id, service_date, booking_ref, guest_name, service_type, cleaner_name,
+                    start_time, end_time, hours_worked, hourly_rate, extra_cost,
+                    custom_total_override, total_cost, payment_status, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (
+                    int(utente_id),
+                    str(data.get("service_date", "")),
+                    str(data.get("booking_ref", "") or ""),
+                    str(data.get("guest_name", "") or ""),
+                    str(data.get("service_type", "check_out") or "check_out"),
+                    str(data.get("cleaner_name", "") or ""),
+                    str(data.get("start_time", "") or ""),
+                    str(data.get("end_time", "") or ""),
+                    float(data.get("hours_worked", 0) or 0),
+                    float(data.get("hourly_rate", 0) or 0),
+                    float(data.get("extra_cost", 0) or 0),
+                    (None if data.get("custom_total_override", None) in [None, ""] else float(data.get("custom_total_override"))),
+                    float(data.get("total_cost", 0) or 0),
+                    str(data.get("payment_status", "Da pagare") or "Da pagare"),
+                    str(data.get("notes", "") or ""),
+                ),
+            )
+            inserted = cur.fetchone()
+            inserted = dict(inserted) if inserted else None
+            new_id = inserted.get("id") if inserted else None
+        else:
+            cur.execute(
+                """
+                INSERT INTO cleaning_services (
+                    utente_id, service_date, booking_ref, guest_name, service_type, cleaner_name,
+                    start_time, end_time, hours_worked, hourly_rate, extra_cost,
+                    custom_total_override, total_cost, payment_status, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    int(utente_id),
+                    str(data.get("service_date", "")),
+                    str(data.get("booking_ref", "") or ""),
+                    str(data.get("guest_name", "") or ""),
+                    str(data.get("service_type", "check_out") or "check_out"),
+                    str(data.get("cleaner_name", "") or ""),
+                    str(data.get("start_time", "") or ""),
+                    str(data.get("end_time", "") or ""),
+                    float(data.get("hours_worked", 0) or 0),
+                    float(data.get("hourly_rate", 0) or 0),
+                    float(data.get("extra_cost", 0) or 0),
+                    (None if data.get("custom_total_override", None) in [None, ""] else float(data.get("custom_total_override"))),
+                    float(data.get("total_cost", 0) or 0),
+                    str(data.get("payment_status", "Da pagare") or "Da pagare"),
+                    str(data.get("notes", "") or ""),
+                ),
+            )
+            new_id = cur.lastrowid
+
+        if new_id is None:
+            raise RuntimeError("Il database non ha restituito l'ID del servizio pulizia.")
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    saved_row = get_cleaning_service_by_id(utente_id, new_id)
+    if saved_row is None:
+        raise RuntimeError("Il servizio pulizia non risulta salvato nel database dopo il commit.")
+
+    return int(new_id)
 
 def load_cleaning_services(utente_id):
-    conn = get_conn()
-    query = """
-        SELECT id, service_date, booking_ref, guest_name, service_type, cleaner_name,
-               start_time, end_time, hours_worked, hourly_rate, extra_cost,
-               custom_total_override, total_cost, payment_status, notes, created_at
-        FROM cleaning_services
-        WHERE utente_id = ?
-        ORDER BY date(service_date) DESC, id DESC
-    """
-    df = pd.read_sql_query(query, conn, params=(int(utente_id),))
-    conn.close()
-    return df
+    """Carica i servizi pulizie dal database in modo compatibile con Render/Postgres.
 
+    Non usa pd.read_sql_query perché con psycopg2/Postgres e placeholder SQLite-style
+    può produrre letture sporche o incoerenti. Gli ID vengono normalizzati e le righe
+    non valide vengono scartate per evitare crash e false mancate visualizzazioni.
+    """
+    columns = [
+        "id", "service_date", "booking_ref", "guest_name", "service_type", "cleaner_name",
+        "start_time", "end_time", "hours_worked", "hourly_rate", "extra_cost",
+        "custom_total_override", "total_cost", "payment_status", "notes", "created_at",
+    ]
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, service_date, booking_ref, guest_name, service_type, cleaner_name,
+                   start_time, end_time, hours_worked, hourly_rate, extra_cost,
+                   custom_total_override, total_cost, payment_status, notes, created_at
+            FROM cleaning_services
+            WHERE utente_id = ?
+            ORDER BY service_date DESC, id DESC
+            """,
+            (int(utente_id),),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame([dict(row) for row in rows])
+    for col in columns:
+        if col not in df.columns:
+            df[col] = None
+
+    df["id"] = pd.to_numeric(df["id"], errors="coerce")
+    df = df[df["id"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df["id"] = df["id"].astype(int)
+    df["service_date"] = df["service_date"].fillna("").astype(str)
+    df["booking_ref"] = df["booking_ref"].fillna("").astype(str)
+    df["guest_name"] = df["guest_name"].fillna("").astype(str)
+    df["service_type"] = df["service_type"].fillna("check_out").astype(str)
+    df["cleaner_name"] = df["cleaner_name"].fillna("").astype(str)
+    df["start_time"] = df["start_time"].fillna("").astype(str)
+    df["end_time"] = df["end_time"].fillna("").astype(str)
+    df["payment_status"] = df["payment_status"].fillna("Da pagare").astype(str)
+    df["notes"] = df["notes"].fillna("").astype(str)
+
+    for col in ["hours_worked", "hourly_rate", "extra_cost", "custom_total_override", "total_cost"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    for col in ["hours_worked", "hourly_rate", "extra_cost", "total_cost"]:
+        df[col] = df[col].fillna(0.0)
+
+    return df[columns]
+
+
+def filter_cleaning_services_for_active_bookings(cleaning_df, active_bookings_df):
+    """Mostra solo pulizie collegate a prenotazioni attive della Dashboard.
+
+    Il collegamento principale è booking_ref. Come fallback usa nome ospite + data pulizia
+    compresa tra check-in e check-out, così funziona anche se il formato del riferimento cambia.
+    """
+    if cleaning_df is None or cleaning_df.empty:
+        return pd.DataFrame() if cleaning_df is None else cleaning_df.copy()
+
+    if active_bookings_df is None or active_bookings_df.empty:
+        return cleaning_df.iloc[0:0].copy()
+
+    active = ensure_booking_dataframe_columns(active_bookings_df)
+    active = active[active["status"].fillna("").astype(str).str.lower() != "cancelled"].copy()
+    if active.empty:
+        return cleaning_df.iloc[0:0].copy()
+
+    active_refs = set()
+    active_ranges = []
+
+    for _, row in active.iterrows():
+        guest_name = str(row.get("guest_name", "") or "").strip()
+        platform = str(row.get("platform", "Booking") or "Booking").strip() or "Booking"
+        check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
+        check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
+
+        if not guest_name or pd.isna(check_in) or pd.isna(check_out):
+            continue
+
+        check_in_date = check_in.date()
+        check_out_date = check_out.date()
+        check_in_iso = check_in_date.isoformat()
+        check_out_iso = check_out_date.isoformat()
+
+        active_refs.add(f"{platform}|{guest_name}|{check_in_iso}|{check_out_iso}")
+        active_refs.add(f"{platform}||{guest_name}||{check_in_iso}||{check_out_iso}")
+        active_refs.add(booking_reference(row))
+        active_ranges.append((guest_name.lower(), check_in_date, check_out_date))
+
+    out = cleaning_df.copy()
+    out["booking_ref_clean"] = out.get("booking_ref", "").fillna("").astype(str).str.strip()
+    out["guest_name_clean"] = out.get("guest_name", "").fillna("").astype(str).str.strip().str.lower()
+    out["service_date_dt"] = pd.to_datetime(out.get("service_date"), errors="coerce").dt.date
+
+    def _is_linked(row):
+        if str(row.get("booking_ref_clean", "")) in active_refs:
+            return True
+        guest = str(row.get("guest_name_clean", ""))
+        service_date = row.get("service_date_dt")
+        if not guest or service_date is None or pd.isna(service_date):
+            return False
+        for active_guest, check_in_date, check_out_date in active_ranges:
+            # Primo fallback: stesso ospite e data pulizia dentro il soggiorno.
+            if guest == active_guest and check_in_date <= service_date <= check_out_date:
+                return True
+
+        # Fallback finale: se la prenotazione è ancora attiva in Dashboard e il servizio
+        # è salvato con lo stesso nome ospite ma con booking_ref/data non perfetti,
+        # lo mostriamo comunque. Se la prenotazione sparisce dalla Dashboard, sparisce anche qui.
+        if guest and any(guest == active_guest for active_guest, _, _ in active_ranges):
+            return True
+
+        return False
+
+    keep_mask = out.apply(_is_linked, axis=1)
+    out = out[keep_mask].drop(columns=["booking_ref_clean", "guest_name_clean", "service_date_dt"], errors="ignore")
+    return out.copy()
 
 def update_cleaning_payment_status(utente_id, service_id, payment_status):
     conn = get_conn()
@@ -1548,37 +1737,66 @@ def update_custom_booking(utente_id, booking_id, data):
 def delete_custom_booking(utente_id, booking_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT platform, guest_name, check_in, check_out FROM custom_bookings WHERE id = ? AND utente_id = ?",
-        (int(booking_id), int(utente_id)),
-    )
-    row = cur.fetchone()
+    try:
+        cur.execute(
+            "SELECT platform, guest_name, check_in, check_out FROM custom_bookings WHERE id = ? AND utente_id = ?",
+            (int(booking_id), int(utente_id)),
+        )
+        row = cur.fetchone()
 
-    cur.execute(
-        "DELETE FROM custom_bookings WHERE id = ? AND utente_id = ?",
-        (int(booking_id), int(utente_id)),
-    )
-    changed = cur.rowcount
+        cur.execute(
+            "DELETE FROM custom_bookings WHERE id = ? AND utente_id = ?",
+            (int(booking_id), int(utente_id)),
+        )
+        changed = cur.rowcount
 
-    if row:
-        try:
-            platform = str(row.get("platform", "Custom") or "Custom")
-            guest_name = str(row.get("guest_name", "") or "").strip()
-            check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
-            check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
-            if guest_name and pd.notna(check_in) and pd.notna(check_out):
-                booking_ref_pipe = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
-                booking_ref_bars = f"{platform}||{guest_name}||{check_in.date().isoformat()}||{check_out.date().isoformat()}"
-                cur.execute(
-                    "DELETE FROM scheduled_messages WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
-                    (int(utente_id), booking_ref_pipe, booking_ref_bars),
-                )
-        except Exception:
-            pass
+        if row:
+            try:
+                row_dict = dict(row)
+                platform = str(row_dict.get("platform", "Custom") or "Custom").strip() or "Custom"
+                guest_name = str(row_dict.get("guest_name", "") or "").strip()
+                check_in = pd.to_datetime(row_dict.get("check_in"), errors="coerce")
+                check_out = pd.to_datetime(row_dict.get("check_out"), errors="coerce")
 
-    conn.commit()
-    conn.close()
-    return changed > 0
+                if guest_name and pd.notna(check_in) and pd.notna(check_out):
+                    check_in_iso = check_in.date().isoformat()
+                    check_out_iso = check_out.date().isoformat()
+
+                    booking_ref_pipe = f"{platform}|{guest_name}|{check_in_iso}|{check_out_iso}"
+                    booking_ref_bars = f"{platform}||{guest_name}||{check_in_iso}||{check_out_iso}"
+
+                    # Quando elimino una prenotazione custom dalla dashboard, elimino anche
+                    # i messaggi programmati e i servizi pulizia collegati a quella prenotazione.
+                    cur.execute(
+                        "DELETE FROM scheduled_messages WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
+                        (int(utente_id), booking_ref_pipe, booking_ref_bars),
+                    )
+                    cur.execute(
+                        "DELETE FROM cleaning_services WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
+                        (int(utente_id), booking_ref_pipe, booking_ref_bars),
+                    )
+
+                    # Fallback prudente: elimina eventuali servizi pulizia salvati prima del booking_ref
+                    # ma associati allo stesso ospite e alla stessa data di check-out.
+                    cur.execute(
+                        """
+                        DELETE FROM cleaning_services
+                        WHERE utente_id = ?
+                          AND TRIM(COALESCE(guest_name, '')) = ?
+                          AND service_date = ?
+                        """,
+                        (int(utente_id), guest_name, check_out_iso),
+                    )
+            except Exception:
+                pass
+
+        conn.commit()
+        return changed > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def cleanup_bad_custom_bookings(utente_id):
@@ -5155,7 +5373,8 @@ if "pulizie_servizi" in tab_map:
             valid_cleaning = df[df["status"].str.lower() != "cancelled"].copy()
             valid_cleaning = valid_cleaning.sort_values(["check_out", "check_in", "guest_name"])
 
-            cleaning_df = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df_all = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df = filter_cleaning_services_for_active_bookings(cleaning_df_all, valid_cleaning)
 
             current_period_cleaning = pd.DataFrame()
             if not cleaning_df.empty:
@@ -5301,42 +5520,68 @@ if "pulizie_servizi" in tab_map:
             cleaning_notes = st.text_area("Note", key="cleaning_notes", height=90)
 
             if st.button("Salva servizio pulizia", use_container_width=True, key="save_cleaning_service_button"):
-                save_cleaning_service(
-                    st.session_state.utente["id"],
-                    {
-                        "service_date": service_date.isoformat(),
-                        "booking_ref": booking_ref_for_service,
-                        "guest_name": guest_name_for_service,
-                        "service_type": service_type,
-                        "cleaner_name": cleaner_name,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "hours_worked": hours_worked,
-                        "hourly_rate": hourly_rate,
-                        "extra_cost": extra_cost,
-                        "custom_total_override": (custom_total_override if use_custom_total else None),
-                        "total_cost": total_cost,
-                        "payment_status": payment_status,
-                        "notes": cleaning_notes,
-                    },
-                )
-                st.success("Servizio pulizia salvato.")
-                st.rerun()
+                try:
+                    # Mantiene la pulizia agganciata alla prenotazione selezionata.
+                    # Se il date_input aveva in memoria un valore vecchio, non salva più fuori periodo.
+                    service_date_to_save = service_date
+                    if selected_booking:
+                        if service_type == "check_out":
+                            service_date_to_save = selected_booking["checkout_date"]
+                        elif service_type == "check_in":
+                            service_date_to_save = selected_booking["checkin_date"]
+
+                    new_cleaning_id = save_cleaning_service(
+                        st.session_state.utente["id"],
+                        {
+                            "service_date": service_date_to_save.isoformat(),
+                            "booking_ref": booking_ref_for_service,
+                            "guest_name": guest_name_for_service,
+                            "service_type": service_type,
+                            "cleaner_name": cleaner_name,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "hours_worked": hours_worked,
+                            "hourly_rate": hourly_rate,
+                            "extra_cost": extra_cost,
+                            "custom_total_override": (custom_total_override if use_custom_total else None),
+                            "total_cost": total_cost,
+                            "payment_status": payment_status,
+                            "notes": cleaning_notes,
+                        },
+                    )
+                    saved_cleaning_row = get_cleaning_service_by_id(st.session_state.utente["id"], new_cleaning_id)
+                    if saved_cleaning_row is None:
+                        st.error("Il servizio pulizia non risulta rileggibile dal database dopo il salvataggio.")
+                    else:
+                        st.success(f"Servizio pulizia salvato correttamente (ID {new_cleaning_id}).")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Errore salvataggio servizio pulizia: {exc}")
 
             st.markdown("### Modifica pulizie")
-            cleaning_df = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df_all = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df = filter_cleaning_services_for_active_bookings(cleaning_df_all, valid_cleaning)
+            if not cleaning_df.empty and "id" in cleaning_df.columns:
+                cleaning_df = cleaning_df.copy()
+                cleaning_df["id"] = pd.to_numeric(cleaning_df["id"], errors="coerce")
+                cleaning_df = cleaning_df[cleaning_df["id"].notna()].copy()
+                cleaning_df["id"] = cleaning_df["id"].astype(int)
+
             if cleaning_df.empty:
-                st.info("Nessun servizio pulizia registrato.")
+                if not cleaning_df_all.empty:
+                    st.info("Nessun servizio pulizia collegato alle prenotazioni attive della Dashboard.")
+                else:
+                    st.info("Nessun servizio pulizia registrato.")
             else:
                 action_col1, action_col2 = st.columns(2)
                 with action_col1:
                     selected_cleaning_id = st.selectbox(
                         "Seleziona servizio da modificare",
-                        options=cleaning_df["id"].astype(int).tolist(),
+                        options=cleaning_df["id"].tolist(),
                         format_func=lambda sid: (
                             f'#{int(sid)} · '
-                            f'{cleaning_df.loc[cleaning_df["id"] == sid, "guest_name"].iloc[0]} · '
-                            f'{pd.to_datetime(cleaning_df.loc[cleaning_df["id"] == sid, "service_date"], errors="coerce").dt.strftime("%d/%m/%Y").iloc[0]}'
+                            f'{cleaning_df.loc[cleaning_df["id"] == int(sid), "guest_name"].iloc[0]} · '
+                            f'{pd.to_datetime(cleaning_df.loc[cleaning_df["id"] == int(sid), "service_date"], errors="coerce").dt.strftime("%d/%m/%Y").iloc[0]}'
                         ),
                         key="selected_cleaning_service_id",
                     )
