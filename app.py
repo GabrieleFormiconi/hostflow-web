@@ -2189,6 +2189,14 @@ def load_data(uploaded_file, cleaning_cost_default, import_mode):
     raise ValueError("Formato non supportato. Usa CSV, XLS o XLSX.")
 
 
+@st.cache_data(show_spinner=False)
+def load_data_cached_from_bytes(file_bytes, file_name, cleaning_cost_default, import_mode):
+    """Carica e normalizza il file prenotazioni solo quando cambiano file/impostazioni rilevanti."""
+    buffer_file = BytesIO(file_bytes)
+    buffer_file.name = file_name or "prenotazioni.xlsx"
+    return load_data(buffer_file, cleaning_cost_default, import_mode)
+
+
 def get_weekend_days(mode):
     if mode == "Ven-Sab-Dom":
         return {4, 5, 6}
@@ -3619,7 +3627,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
 
 
 
-    visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
+    visible_columns = saved_settings.get("dashboard_visible_columns", saved_visible_columns.copy())
     visible_columns = [col for col in visible_columns if col in all_columns]
     if not visible_columns:
         visible_columns = saved_visible_columns.copy() if saved_visible_columns else all_columns.copy()
@@ -4139,7 +4147,7 @@ inizializza_sidebar_state(st.session_state.utente["id"])
 st.session_state.cleaning_cost_default = 0.0
 st.session_state.monthly_cleaning_cost = 0.0
 
-if st.session_state.get("auth_token"):
+if st.session_state.get("auth_token") and st.query_params.get("session") != st.session_state["auth_token"]:
     st.query_params["session"] = st.session_state["auth_token"]
 
 if st.session_state.get("file_prenotazioni_virtuale") is None:
@@ -4185,7 +4193,6 @@ with st.sidebar:
             st.session_state.file_prenotazioni_virtuale = buffer_file
             st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
             st.session_state.file_prenotazioni_signature = uploaded_signature
-            st.rerun()
 
     uploaded_file = st.session_state.get("file_prenotazioni_virtuale")
 
@@ -4313,7 +4320,8 @@ with st.sidebar:
                 key="custom_end_date"
             )
 
-    merged_sidebar_settings = carica_sidebar_settings(st.session_state.utente["id"])
+    current_sidebar_settings = carica_sidebar_settings(st.session_state.utente["id"])
+    merged_sidebar_settings = dict(current_sidebar_settings)
     merged_sidebar_settings.update({
         "import_mode": import_mode,
         "cleaning_mode": cleaning_mode,
@@ -4334,7 +4342,8 @@ with st.sidebar:
         "custom_start_date": custom_start_date.isoformat() if hasattr(custom_start_date, "isoformat") else str(custom_start_date),
         "custom_end_date": custom_end_date.isoformat() if hasattr(custom_end_date, "isoformat") else str(custom_end_date),
     })
-    salva_sidebar_settings(st.session_state.utente["id"], merged_sidebar_settings)
+    if merged_sidebar_settings != current_sidebar_settings:
+        salva_sidebar_settings(st.session_state.utente["id"], merged_sidebar_settings)
 
     st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
     if st.button("Logout", use_container_width=True, key="logout_sidebar_bottom"):
@@ -4371,7 +4380,14 @@ if uploaded_file or not custom_bookings_df.empty:
         if uploaded_file:
             if hasattr(uploaded_file, "seek"):
                 uploaded_file.seek(0)
-            raw_df = load_data(uploaded_file, cleaning_cost_default, import_mode)
+            uploaded_file_bytes = uploaded_file.getvalue()
+            uploaded_file_name = getattr(uploaded_file, "name", st.session_state.get("file_prenotazioni_nome") or "prenotazioni.xlsx")
+            raw_df = load_data_cached_from_bytes(
+                uploaded_file_bytes,
+                uploaded_file_name,
+                float(cleaning_cost_default),
+                import_mode,
+            )
 
         merged_raw_df = merge_booking_sources(raw_df, custom_bookings_df)
         df = enrich_financials(
