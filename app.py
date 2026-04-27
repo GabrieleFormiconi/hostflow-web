@@ -755,8 +755,16 @@ def filter_cleaning_services_for_active_bookings(cleaning_df, active_bookings_df
         if not guest or service_date is None or pd.isna(service_date):
             return False
         for active_guest, check_in_date, check_out_date in active_ranges:
+            # Primo fallback: stesso ospite e data pulizia dentro il soggiorno.
             if guest == active_guest and check_in_date <= service_date <= check_out_date:
                 return True
+
+        # Fallback finale: se la prenotazione è ancora attiva in Dashboard e il servizio
+        # è salvato con lo stesso nome ospite ma con booking_ref/data non perfetti,
+        # lo mostriamo comunque. Se la prenotazione sparisce dalla Dashboard, sparisce anche qui.
+        if guest and any(guest == active_guest for active_guest, _, _ in active_ranges):
+            return True
+
         return False
 
     keep_mask = out.apply(_is_linked, axis=1)
@@ -5512,10 +5520,19 @@ if "pulizie_servizi" in tab_map:
 
             if st.button("Salva servizio pulizia", use_container_width=True, key="save_cleaning_service_button"):
                 try:
+                    # Mantiene la pulizia agganciata alla prenotazione selezionata.
+                    # Se il date_input aveva in memoria un valore vecchio, non salva più fuori periodo.
+                    service_date_to_save = service_date
+                    if selected_booking:
+                        if service_type == "check_out":
+                            service_date_to_save = selected_booking["checkout_date"]
+                        elif service_type == "check_in":
+                            service_date_to_save = selected_booking["checkin_date"]
+
                     new_cleaning_id = save_cleaning_service(
                         st.session_state.utente["id"],
                         {
-                            "service_date": service_date.isoformat(),
+                            "service_date": service_date_to_save.isoformat(),
                             "booking_ref": booking_ref_for_service,
                             "guest_name": guest_name_for_service,
                             "service_type": service_type,
@@ -5531,8 +5548,12 @@ if "pulizie_servizi" in tab_map:
                             "notes": cleaning_notes,
                         },
                     )
-                    st.success(f"Servizio pulizia salvato correttamente (ID {new_cleaning_id}).")
-                    st.rerun()
+                    saved_cleaning_row = get_cleaning_service_by_id(st.session_state.utente["id"], new_cleaning_id)
+                    if saved_cleaning_row is None:
+                        st.error("Il servizio pulizia non risulta rileggibile dal database dopo il salvataggio.")
+                    else:
+                        st.success(f"Servizio pulizia salvato correttamente (ID {new_cleaning_id}).")
+                        st.rerun()
                 except Exception as exc:
                     st.error(f"Errore salvataggio servizio pulizia: {exc}")
 
