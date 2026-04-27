@@ -3290,8 +3290,8 @@ def render_dashboard_dataframe(df_to_show, user_id):
                     new_custom_id = save_custom_booking(user_id, custom_payload)
                     custom_payload["id"] = new_custom_id
                     st.session_state["last_saved_custom_booking_payload"] = custom_payload
-                    st.success(f"Prenotazione custom salvata correttamente (ID {new_custom_id}).")
-                    custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
+                    st.session_state["custom_booking_saved_ok"] = f"Prenotazione custom salvata correttamente (ID {new_custom_id})."
+                    st.rerun()
                 except Exception as exc:
                     st.error(f"Errore salvataggio prenotazione custom: {exc}")
 
@@ -3311,66 +3311,62 @@ def render_dashboard_dataframe(df_to_show, user_id):
             selected_custom_id = edit_options[selected_custom_label]
             selected_custom_row = custom_bookings_df[custom_bookings_df["id"] == selected_custom_id].iloc[0]
 
-            with st.form(f"custom_booking_edit_form_{selected_custom_id}", clear_on_submit=False):
-                ec1, ec2 = st.columns(2)
-                with ec1:
-                    edit_guest_name = st.text_input("Nome ospite", value=str(selected_custom_row["guest_name"]), key=f"edit_custom_guest_name_{selected_custom_id}")
-                    edit_guest_phone = st.text_input(
-                        "Telefono ospite",
-                        value=str(selected_custom_row.get("guest_phone", "") or ""),
-                        key=f"edit_custom_guest_phone_{selected_custom_id}"
-                    )
-                    edit_check_in = st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
-                    edit_check_out = st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
-                    edit_guests = st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
-                with ec2:
-                    edit_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
-                    edit_cleaning_cost = st.number_input("Pulizie (€)", min_value=0.0, value=float(selected_custom_row["cleaning_cost"]), step=5.0, key=f"edit_custom_cleaning_cost_{selected_custom_id}")
-                    current_status = str(selected_custom_row["status"])
-                    status_options = ["confirmed", "cancelled"]
-                    status_index = status_options.index(current_status) if current_status in status_options else 0
-                    edit_status = st.selectbox("Stato prenotazione", status_options, index=status_index, key=f"edit_custom_status_{selected_custom_id}")
+            ec1, ec2 = st.columns(2)
+            with ec1:
+                edit_guest_name = st.text_input("Nome ospite", value=str(selected_custom_row["guest_name"]), key=f"edit_custom_guest_name_{selected_custom_id}")
+                edit_guest_phone = st.text_input(
+                    "Telefono ospite",
+                    value=str(selected_custom_row.get("guest_phone", "") or ""),
+                    key=f"edit_custom_guest_phone_{selected_custom_id}"
+                )
+                edit_check_in = st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
+                edit_check_out = st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
+                edit_guests = st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
+            with ec2:
+                edit_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
+                edit_cleaning_cost = st.number_input("Pulizie (€)", min_value=0.0, value=float(selected_custom_row["cleaning_cost"]), step=5.0, key=f"edit_custom_cleaning_cost_{selected_custom_id}")
+                current_status = str(selected_custom_row["status"])
+                status_options = ["confirmed", "cancelled"]
+                status_index = status_options.index(current_status) if current_status in status_options else 0
+                edit_status = st.selectbox("Stato prenotazione", status_options, index=status_index, key=f"edit_custom_status_{selected_custom_id}")
 
-                edit_notes = st.text_area("Note", value=str(selected_custom_row.get("notes", "") or ""), height=80, key=f"edit_custom_notes_{selected_custom_id}")
-                update_custom_clicked = st.form_submit_button("Aggiorna prenotazione custom", use_container_width=True)
-
-            if update_custom_clicked:
-                if not str(edit_guest_name).strip():
-                    st.error("Inserisci il nome ospite.")
-                elif edit_check_out <= edit_check_in:
-                    st.error("Il check-out deve essere successivo al check-in.")
-                else:
-                    ok = update_custom_booking(
-                        user_id,
-                        selected_custom_id,
-                        {
-                            "guest_name": edit_guest_name,
-                            "guest_phone": edit_guest_phone,
-                            "check_in": edit_check_in.isoformat(),
-                            "check_out": edit_check_out.isoformat(),
-                            "total_price": edit_total_price,
-                            "cleaning_cost": edit_cleaning_cost,
-                            "platform_fee": 0.0,
-                            "transaction_cost": 0.0,
-                            "raw_booking_status": edit_status,
-                            "status": edit_status,
-                            "guests": edit_guests,
-                            "notes": edit_notes,
-                        },
-                    )
-                    if ok:
-                        st.success("Prenotazione custom aggiornata.")
-                        custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
+            edit_notes = st.text_area("Note", value=str(selected_custom_row.get("notes", "") or ""), height=80, key=f"edit_custom_notes_{selected_custom_id}")
 
             ea1, ea2 = st.columns(2)
             with ea1:
-                st.empty()
+                if st.button("Aggiorna prenotazione custom", use_container_width=True, key=f"update_custom_booking_button_{selected_custom_id}"):
+                    if not str(edit_guest_name).strip():
+                        st.error("Inserisci il nome ospite.")
+                    elif edit_check_out <= edit_check_in:
+                        st.error("Il check-out deve essere successivo al check-in.")
+                    else:
+                        ok = update_custom_booking(
+                            user_id,
+                            selected_custom_id,
+                            {
+                                "guest_name": edit_guest_name,
+                                "guest_phone": edit_guest_phone,
+                                "check_in": edit_check_in.isoformat(),
+                                "check_out": edit_check_out.isoformat(),
+                                "total_price": edit_total_price,
+                                "cleaning_cost": edit_cleaning_cost,
+                                "platform_fee": 0.0,
+                                "transaction_cost": 0.0,
+                                "raw_booking_status": edit_status,
+                                "status": edit_status,
+                                "guests": edit_guests,
+                                "notes": edit_notes,
+                            },
+                        )
+                        if ok:
+                            st.success("Prenotazione custom aggiornata.")
+                            st.rerun()
             with ea2:
                 if st.button("Elimina prenotazione custom", use_container_width=True, key=f"delete_custom_booking_button_{selected_custom_id}"):
                     ok = delete_custom_booking(user_id, selected_custom_id)
                     if ok:
                         st.success("Prenotazione custom eliminata.")
-                        custom_bookings_df = append_last_saved_custom_if_missing(load_custom_bookings(user_id))
+                        st.rerun()
 
 
     visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
