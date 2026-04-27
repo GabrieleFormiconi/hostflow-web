@@ -638,6 +638,51 @@ def load_cleaning_services(utente_id):
     return df[columns]
 
 
+def filter_cleaning_services_for_active_bookings(cleaning_df, active_bookings_df):
+    """Mostra in Pulizie solo i servizi collegati a prenotazioni ancora presenti in Dashboard.
+
+    Se una prenotazione viene cancellata dalla Dashboard, eventuali servizi pulizia rimasti
+    nel database non devono più comparire nella sezione Pulizie.
+    """
+    if cleaning_df is None or cleaning_df.empty:
+        return pd.DataFrame() if cleaning_df is None else cleaning_df.copy()
+
+    if active_bookings_df is None or active_bookings_df.empty:
+        return cleaning_df.iloc[0:0].copy()
+
+    active = ensure_booking_dataframe_columns(active_bookings_df)
+    active = active[active["status"].fillna("").astype(str).str.lower() != "cancelled"].copy()
+    if active.empty:
+        return cleaning_df.iloc[0:0].copy()
+
+    active_refs = set()
+    active_fallback_keys = set()
+
+    for _, row in active.iterrows():
+        guest_name = str(row.get("guest_name", "") or "").strip()
+        platform = str(row.get("platform", "Booking") or "Booking").strip() or "Booking"
+        check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
+        check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
+
+        if guest_name and pd.notna(check_in) and pd.notna(check_out):
+            check_in_iso = check_in.date().isoformat()
+            check_out_iso = check_out.date().isoformat()
+            active_refs.add(f"{platform}|{guest_name}|{check_in_iso}|{check_out_iso}")
+            active_refs.add(f"{platform}||{guest_name}||{check_in_iso}||{check_out_iso}")
+            active_fallback_keys.add(f"{guest_name}||{check_in_iso}")
+            active_fallback_keys.add(f"{guest_name}||{check_out_iso}")
+
+    out = cleaning_df.copy()
+    out["booking_ref"] = out.get("booking_ref", "").fillna("").astype(str).str.strip()
+    out["guest_name"] = out.get("guest_name", "").fillna("").astype(str).str.strip()
+    out["service_date_iso"] = pd.to_datetime(out.get("service_date"), errors="coerce").dt.date.astype(str)
+    out["fallback_key"] = out["guest_name"] + "||" + out["service_date_iso"]
+
+    keep_mask = out["booking_ref"].isin(active_refs) | out["fallback_key"].isin(active_fallback_keys)
+    out = out[keep_mask].drop(columns=["service_date_iso", "fallback_key"], errors="ignore")
+    return out.copy()
+
+
 def update_cleaning_payment_status(utente_id, service_id, payment_status):
     conn = get_conn()
     cur = conn.cursor()
@@ -5239,7 +5284,8 @@ if "pulizie_servizi" in tab_map:
             valid_cleaning = df[df["status"].str.lower() != "cancelled"].copy()
             valid_cleaning = valid_cleaning.sort_values(["check_out", "check_in", "guest_name"])
 
-            cleaning_df = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df_all = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df = filter_cleaning_services_for_active_bookings(cleaning_df_all, valid_cleaning)
 
             current_period_cleaning = pd.DataFrame()
             if not cleaning_df.empty:
@@ -5408,7 +5454,8 @@ if "pulizie_servizi" in tab_map:
                 st.rerun()
 
             st.markdown("### Modifica pulizie")
-            cleaning_df = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df_all = load_cleaning_services(st.session_state.utente["id"])
+            cleaning_df = filter_cleaning_services_for_active_bookings(cleaning_df_all, valid_cleaning)
             if not cleaning_df.empty and "id" in cleaning_df.columns:
                 cleaning_df = cleaning_df.copy()
                 cleaning_df["id"] = pd.to_numeric(cleaning_df["id"], errors="coerce")
@@ -5416,7 +5463,10 @@ if "pulizie_servizi" in tab_map:
                 cleaning_df["id"] = cleaning_df["id"].astype(int)
 
             if cleaning_df.empty:
-                st.info("Nessun servizio pulizia registrato.")
+                if not cleaning_df_all.empty:
+                    st.info("Nessun servizio pulizia collegato alle prenotazioni attive della Dashboard.")
+                else:
+                    st.info("Nessun servizio pulizia registrato.")
             else:
                 action_col1, action_col2 = st.columns(2)
                 with action_col1:
