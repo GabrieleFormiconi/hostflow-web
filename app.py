@@ -1603,37 +1603,66 @@ def update_custom_booking(utente_id, booking_id, data):
 def delete_custom_booking(utente_id, booking_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT platform, guest_name, check_in, check_out FROM custom_bookings WHERE id = ? AND utente_id = ?",
-        (int(booking_id), int(utente_id)),
-    )
-    row = cur.fetchone()
+    try:
+        cur.execute(
+            "SELECT platform, guest_name, check_in, check_out FROM custom_bookings WHERE id = ? AND utente_id = ?",
+            (int(booking_id), int(utente_id)),
+        )
+        row = cur.fetchone()
 
-    cur.execute(
-        "DELETE FROM custom_bookings WHERE id = ? AND utente_id = ?",
-        (int(booking_id), int(utente_id)),
-    )
-    changed = cur.rowcount
+        cur.execute(
+            "DELETE FROM custom_bookings WHERE id = ? AND utente_id = ?",
+            (int(booking_id), int(utente_id)),
+        )
+        changed = cur.rowcount
 
-    if row:
-        try:
-            platform = str(row.get("platform", "Custom") or "Custom")
-            guest_name = str(row.get("guest_name", "") or "").strip()
-            check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
-            check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
-            if guest_name and pd.notna(check_in) and pd.notna(check_out):
-                booking_ref_pipe = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
-                booking_ref_bars = f"{platform}||{guest_name}||{check_in.date().isoformat()}||{check_out.date().isoformat()}"
-                cur.execute(
-                    "DELETE FROM scheduled_messages WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
-                    (int(utente_id), booking_ref_pipe, booking_ref_bars),
-                )
-        except Exception:
-            pass
+        if row:
+            try:
+                row_dict = dict(row)
+                platform = str(row_dict.get("platform", "Custom") or "Custom").strip() or "Custom"
+                guest_name = str(row_dict.get("guest_name", "") or "").strip()
+                check_in = pd.to_datetime(row_dict.get("check_in"), errors="coerce")
+                check_out = pd.to_datetime(row_dict.get("check_out"), errors="coerce")
 
-    conn.commit()
-    conn.close()
-    return changed > 0
+                if guest_name and pd.notna(check_in) and pd.notna(check_out):
+                    check_in_iso = check_in.date().isoformat()
+                    check_out_iso = check_out.date().isoformat()
+
+                    booking_ref_pipe = f"{platform}|{guest_name}|{check_in_iso}|{check_out_iso}"
+                    booking_ref_bars = f"{platform}||{guest_name}||{check_in_iso}||{check_out_iso}"
+
+                    # Quando elimino una prenotazione custom dalla dashboard, elimino anche
+                    # i messaggi programmati e i servizi pulizia collegati a quella prenotazione.
+                    cur.execute(
+                        "DELETE FROM scheduled_messages WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
+                        (int(utente_id), booking_ref_pipe, booking_ref_bars),
+                    )
+                    cur.execute(
+                        "DELETE FROM cleaning_services WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
+                        (int(utente_id), booking_ref_pipe, booking_ref_bars),
+                    )
+
+                    # Fallback prudente: elimina eventuali servizi pulizia salvati prima del booking_ref
+                    # ma associati allo stesso ospite e alla stessa data di check-out.
+                    cur.execute(
+                        """
+                        DELETE FROM cleaning_services
+                        WHERE utente_id = ?
+                          AND TRIM(COALESCE(guest_name, '')) = ?
+                          AND service_date = ?
+                        """,
+                        (int(utente_id), guest_name, check_out_iso),
+                    )
+            except Exception:
+                pass
+
+        conn.commit()
+        return changed > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def cleanup_bad_custom_bookings(utente_id):
