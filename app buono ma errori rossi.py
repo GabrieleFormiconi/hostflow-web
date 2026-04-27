@@ -1357,8 +1357,119 @@ def load_message_settings(utente_id):
 
 
 
+def save_custom_booking(utente_id, data):
+    """Salva una prenotazione custom e restituisce l'ID creato.
+    Non usa fallback in sessione: la riga deve essere scritta davvero nel database.
+    """
+    payload = normalize_custom_booking_payload(data)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if USE_POSTGRES:
+            cur.execute(
+                """
+                INSERT INTO custom_bookings (
+                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+                    status, guests, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (
+                    int(utente_id),
+                    "Custom",
+                    payload["guest_name"],
+                    payload["guest_phone"],
+                    payload["check_in"],
+                    payload["check_out"],
+                    payload["total_price"],
+                    payload["cleaning_cost"],
+                    payload["platform_fee"],
+                    payload["transaction_cost"],
+                    payload["raw_booking_status"],
+                    payload["status"],
+                    payload["guests"],
+                    payload["notes"],
+                ),
+            )
+            inserted = cur.fetchone()
+            inserted_dict = dict(inserted) if inserted else {}
+            new_id = inserted_dict.get("id")
+        else:
+            cur.execute(
+                """
+                INSERT INTO custom_bookings (
+                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
+                    status, guests, notes, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    int(utente_id),
+                    "Custom",
+                    payload["guest_name"],
+                    payload["guest_phone"],
+                    payload["check_in"],
+                    payload["check_out"],
+                    payload["total_price"],
+                    payload["cleaning_cost"],
+                    payload["platform_fee"],
+                    payload["transaction_cost"],
+                    payload["raw_booking_status"],
+                    payload["status"],
+                    payload["guests"],
+                    payload["notes"],
+                ),
+            )
+            new_id = cur.lastrowid
+
+        if new_id is None:
+            raise RuntimeError("Il database non ha restituito l'ID della prenotazione custom.")
+
+        cur.execute(
+            "SELECT id FROM custom_bookings WHERE utente_id = ? AND id = ?",
+            (int(utente_id), int(new_id)),
+        )
+        if not cur.fetchone():
+            raise RuntimeError("La riga custom non è stata trovata subito dopo l'insert.")
+
+        conn.commit()
+        return int(new_id)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def get_custom_booking_by_id(utente_id, booking_id):
+    """Legge una prenotazione custom direttamente dal database, senza filtri distruttivi."""
+    if booking_id is None:
+        return None
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
+                   cleaning_cost, platform_fee, transaction_cost, raw_booking_status, status, guests, notes
+            FROM custom_bookings
+            WHERE utente_id = ? AND id = ?
+            """,
+            (int(utente_id), int(booking_id)),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return dict(row)
+    finally:
+        conn.close()
+
+
 def normalize_custom_booking_payload(data):
-    """Normalizza e valida una prenotazione custom prima di salvarla/aggiornarla."""
     guest_name_clean = str(data.get("guest_name", "") or "").strip()
     guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
 
@@ -1393,178 +1504,9 @@ def normalize_custom_booking_payload(data):
     }
 
 
-def fetchone_dict(cur):
-    row = cur.fetchone()
-    if not row:
-        return None
-    return dict(row)
-
-
-def get_custom_booking_by_id(utente_id, booking_id):
-    """Rilegge una custom dal DB con una nuova query reale, senza session_state/fallback."""
-    if booking_id is None:
-        return None
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                   cleaning_cost, platform_fee, transaction_cost,
-                   raw_booking_status, status, guests, notes
-            FROM custom_bookings
-            WHERE utente_id = ? AND id = ?
-            """,
-            (int(utente_id), int(booking_id)),
-        )
-        return fetchone_dict(cur)
-    finally:
-        conn.close()
-
-
-def fetchone_dict(cur):
-    row = cur.fetchone()
-    if not row:
-        return None
-    return dict(row)
-
-
-def get_custom_booking_by_id(utente_id, booking_id):
-    """Rilegge una prenotazione custom direttamente dal database, senza fallback/session_state."""
-    if booking_id is None:
-        return None
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                   cleaning_cost, platform_fee, transaction_cost,
-                   raw_booking_status, status, guests, notes
-            FROM custom_bookings
-            WHERE utente_id = ? AND id = ?
-            """,
-            (int(utente_id), int(booking_id)),
-        )
-        return fetchone_dict(cur)
-    finally:
-        conn.close()
-
-
-def save_custom_booking(utente_id, data):
-    """Salva una prenotazione custom e restituisce l'ID creato.
-
-    Dopo il commit rilegge la riga con una nuova connessione: così la conferma viene mostrata
-    solo se la prenotazione è davvero persistita nel database usato da Render/Postgres.
-    """
-    guest_name_clean = str(data.get("guest_name", "") or "").strip()
-    guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
-
-    if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
-        raise ValueError("Nome ospite non valido.")
-    if guest_phone_clean.lower() == "guest_phone":
-        guest_phone_clean = ""
-
-    check_in_value = hf_date(data.get("check_in"))
-    check_out_value = hf_date(data.get("check_out"))
-    if check_in_value is None or check_out_value is None:
-        raise ValueError("Date check-in/check-out non valide.")
-    if check_out_value <= check_in_value:
-        raise ValueError("Il check-out deve essere successivo al check-in.")
-
-    total_price_value = float(data.get("total_price", 0) or 0)
-    cleaning_cost_value = float(data.get("cleaning_cost", 0) or 0)
-    platform_fee_value = float(data.get("platform_fee", 0) or 0)
-    transaction_cost_value = float(data.get("transaction_cost", 0) or 0)
-    guests_value = max(1, int(data.get("guests", 1) or 1))
-    status_value = normalize_status(data.get("status", "confirmed") or "confirmed")
-    raw_status_value = str(data.get("raw_booking_status", status_value) or status_value)
-    notes_value = str(data.get("notes", "") or "")
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        if USE_POSTGRES:
-            cur.execute(
-                """
-                INSERT INTO custom_bookings (
-                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-                    status, guests, notes, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                RETURNING id
-                """,
-                (
-                    int(utente_id),
-                    "Custom",
-                    guest_name_clean,
-                    guest_phone_clean,
-                    check_in_value.isoformat(),
-                    check_out_value.isoformat(),
-                    total_price_value,
-                    cleaning_cost_value,
-                    platform_fee_value,
-                    transaction_cost_value,
-                    raw_status_value,
-                    status_value,
-                    guests_value,
-                    notes_value,
-                ),
-            )
-            inserted = fetchone_dict(cur)
-            new_id = inserted.get("id") if inserted else None
-        else:
-            cur.execute(
-                """
-                INSERT INTO custom_bookings (
-                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-                    status, guests, notes, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    int(utente_id),
-                    "Custom",
-                    guest_name_clean,
-                    guest_phone_clean,
-                    check_in_value.isoformat(),
-                    check_out_value.isoformat(),
-                    total_price_value,
-                    cleaning_cost_value,
-                    platform_fee_value,
-                    transaction_cost_value,
-                    raw_status_value,
-                    status_value,
-                    guests_value,
-                    notes_value,
-                ),
-            )
-            new_id = cur.lastrowid
-
-        if new_id is None:
-            raise RuntimeError("Il database non ha restituito l'ID della prenotazione custom.")
-
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-    saved_row = get_custom_booking_by_id(utente_id, new_id)
-    if saved_row is None:
-        raise RuntimeError(
-            "La prenotazione custom non risulta persistita dopo il salvataggio. "
-            "Controlla DATABASE_URL/Postgres su Render."
-        )
-
-    return int(new_id)
-
-
 def update_custom_booking(utente_id, booking_id, data):
     payload = normalize_custom_booking_payload(data)
+
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -1620,11 +1562,10 @@ def delete_custom_booking(utente_id, booking_id):
 
     if row:
         try:
-            row_dict = dict(row)
-            platform = str(row_dict.get("platform", "Custom") or "Custom")
-            guest_name = str(row_dict.get("guest_name", "") or "").strip()
-            check_in = pd.to_datetime(row_dict.get("check_in"), errors="coerce")
-            check_out = pd.to_datetime(row_dict.get("check_out"), errors="coerce")
+            platform = str(row.get("platform", "Custom") or "Custom")
+            guest_name = str(row.get("guest_name", "") or "").strip()
+            check_in = pd.to_datetime(row.get("check_in"), errors="coerce")
+            check_out = pd.to_datetime(row.get("check_out"), errors="coerce")
             if guest_name and pd.notna(check_in) and pd.notna(check_out):
                 booking_ref_pipe = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
                 booking_ref_bars = f"{platform}||{guest_name}||{check_in.date().isoformat()}||{check_out.date().isoformat()}"
@@ -1670,10 +1611,12 @@ def cleanup_bad_custom_bookings(utente_id):
 
 
 def load_custom_bookings(utente_id):
-    """Carica le prenotazioni custom dal database, senza fallback e senza pd.read_sql_query.
+    """Carica le prenotazioni custom dal database in modo compatibile con Render/Postgres.
 
-    Su Render/Postgres usiamo cur.execute/fetchall perché pandas con query SQLite-style "?"
-    può leggere in modo incoerente. Questa è la sorgente reale usata dopo ogni refresh.
+    Nota importante: qui NON usiamo pd.read_sql_query, perché su Render/Postgres può dare
+    risultati non affidabili con il cursor custom usato per convertire i placeholder SQLite.
+    Usiamo invece cur.execute + fetchall, così la stessa logica funziona sia in locale
+    sia su Render con DATABASE_URL.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -1693,27 +1636,24 @@ def load_custom_bookings(utente_id):
     finally:
         conn.close()
 
-    columns = [
-        "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
-        "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
-        "raw_booking_status", "status", "guests", "notes",
-    ]
-
     if not rows:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=[
+            "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
+            "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+            "raw_booking_status", "status", "guests", "notes"
+        ])
 
     df = pd.DataFrame([dict(row) for row in rows])
-    for col in columns:
-        if col not in df.columns:
-            df[col] = 0 if col in ["id", "total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"] else ""
 
-    df["id"] = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int)
-    df["platform"] = df["platform"].fillna("Custom").astype(str).replace("", "Custom")
-    df["guest_name"] = df["guest_name"].fillna("").astype(str).str.strip()
-    df["guest_phone"] = df["guest_phone"].fillna("").astype(str).str.strip()
+    # Normalizzazione molto permissiva: una riga appena salvata non deve sparire dalla UI
+    # per piccoli problemi di tipo dati. La scartiamo solo se manca davvero un dato essenziale.
+    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce").fillna(0).astype(int)
+    df["platform"] = df.get("platform", "Custom").fillna("Custom").astype(str).replace("", "Custom")
+    df["guest_name"] = df.get("guest_name", "").fillna("").astype(str).str.strip()
+    df["guest_phone"] = df.get("guest_phone", "").fillna("").astype(str).str.strip()
 
-    check_in_dt = pd.to_datetime(df["check_in"], errors="coerce")
-    check_out_dt = pd.to_datetime(df["check_out"], errors="coerce")
+    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
+    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
 
     valid_mask = (
         (df["id"] > 0)
@@ -1729,20 +1669,35 @@ def load_custom_bookings(utente_id):
     check_out_dt = check_out_dt[valid_mask]
 
     if df.empty:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=[
+            "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
+            "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+            "raw_booking_status", "status", "guests", "notes"
+        ])
 
     df["check_in"] = check_in_dt.dt.date
     df["check_out"] = check_out_dt.dt.date
 
     for col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        if col not in df.columns:
+            df[col] = 0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df["guests"] = df["guests"].astype(int).clip(lower=1)
-    df["status"] = df["status"].fillna("confirmed").astype(str).replace("", "confirmed").apply(normalize_status)
+
+    if "status" not in df.columns:
+        df["status"] = "confirmed"
+    df["status"] = df["status"].fillna("confirmed").astype(str).apply(normalize_status)
+
+    if "raw_booking_status" not in df.columns:
+        df["raw_booking_status"] = df["status"]
     df["raw_booking_status"] = df["raw_booking_status"].fillna(df["status"]).astype(str)
+
+    if "notes" not in df.columns:
+        df["notes"] = ""
     df["notes"] = df["notes"].fillna("").astype(str)
 
-    return df[columns]
+    return df.reset_index(drop=True)
 
 
 def merge_booking_sources(base_df, custom_df):
@@ -1756,46 +1711,6 @@ def merge_booking_sources(base_df, custom_df):
     if custom.empty:
         return base.copy()
     return ensure_booking_dataframe_columns(pd.concat([base, custom], ignore_index=True, sort=False))
-
-
-def build_complete_bookings_for_messages(utente_id, dashboard_df=None):
-    """Dataset unico per il tab Messaggi: dashboard + prenotazioni custom rilette dal DB."""
-    frames = []
-
-    if dashboard_df is not None and isinstance(dashboard_df, pd.DataFrame) and not dashboard_df.empty:
-        frames.append(ensure_booking_dataframe_columns(dashboard_df))
-
-    try:
-        custom_latest = load_custom_bookings(utente_id)
-        if custom_latest is not None and not custom_latest.empty:
-            frames.append(ensure_booking_dataframe_columns(custom_latest))
-    except Exception:
-        custom_latest = pd.DataFrame()
-
-    if not frames:
-        return ensure_booking_dataframe_columns(pd.DataFrame())
-
-    merged = ensure_booking_dataframe_columns(pd.concat(frames, ignore_index=True, sort=False))
-    merged["check_in_dt"] = pd.to_datetime(merged.get("check_in"), errors="coerce")
-    merged["check_out_dt"] = pd.to_datetime(merged.get("check_out"), errors="coerce")
-    merged = merged[
-        merged["check_in_dt"].notna()
-        & merged["check_out_dt"].notna()
-        & (merged["check_out_dt"] > merged["check_in_dt"])
-    ].copy()
-
-    if merged.empty:
-        return ensure_booking_dataframe_columns(pd.DataFrame())
-
-    merged["_dedupe_key"] = (
-        merged.get("platform", "").fillna("").astype(str).str.lower().str.strip() + "|"
-        + merged.get("guest_name", "").fillna("").astype(str).str.lower().str.strip() + "|"
-        + merged["check_in_dt"].dt.strftime("%Y-%m-%d") + "|"
-        + merged["check_out_dt"].dt.strftime("%Y-%m-%d")
-    )
-    merged = merged.drop_duplicates(subset=["_dedupe_key"], keep="last")
-    merged = merged.drop(columns=["check_in_dt", "check_out_dt", "_dedupe_key"], errors="ignore")
-    return ensure_booking_dataframe_columns(merged.reset_index(drop=True))
 
 
 
@@ -1909,6 +1824,24 @@ def inizializza_sidebar_state(utente_id):
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def apply_pending_dashboard_period_from_custom_save():
+    """Dopo il salvataggio di una custom booking, porta la dashboard sul mese della prenotazione."""
+    pending = st.session_state.pop("pending_custom_booking_period", None)
+    if not isinstance(pending, dict):
+        return
+    try:
+        target_year = int(pending.get("year"))
+        target_month = int(pending.get("month"))
+    except Exception:
+        return
+    if target_year < 2024 or target_year > 2035 or target_month < 1 or target_month > 12:
+        return
+    st.session_state["dashboard_period_mode"] = "Mensile"
+    st.session_state["selected_year"] = target_year
+    st.session_state["selected_month"] = target_month
+    st.session_state["selected_month_initialized"] = True
 
 
 def inizializza_sessione():
@@ -2187,14 +2120,6 @@ def load_data(uploaded_file, cleaning_cost_default, import_mode):
         raise ValueError("Excel non riconosciuto. Per ora supporto diretto solo per export Booking.")
 
     raise ValueError("Formato non supportato. Usa CSV, XLS o XLSX.")
-
-
-@st.cache_data(show_spinner=False)
-def load_data_cached_from_bytes(file_bytes, file_name, cleaning_cost_default, import_mode):
-    """Carica e normalizza il file prenotazioni solo quando cambiano file/impostazioni rilevanti."""
-    buffer_file = BytesIO(file_bytes)
-    buffer_file.name = file_name or "prenotazioni.xlsx"
-    return load_data(buffer_file, cleaning_cost_default, import_mode)
 
 
 def get_weekend_days(mode):
@@ -2542,7 +2467,11 @@ def period_stats(df, start_date, end_date):
 
 
 def filter_df_by_period(df, start_date, end_date):
-    return df[hf_filter_between_dates(df, "check_in", start_date, end_date)].copy()
+    df = ensure_booking_dataframe_columns(df)
+    return df[
+        (hf_date_series(df["check_in"]) < hf_bound(end_date))
+        & (hf_date_series(df["check_out"]) >= hf_bound(start_date))
+    ].copy()
 
 
 def build_period_summary(df, year, period_mode="Mensile", custom_start=None, custom_end=None):
@@ -2882,14 +2811,8 @@ def build_scheduled_messages_for_booking(row, profilo, scheduling_rules=None, te
     guest_name = str(row.get("guest_name", "") or "").strip() or "Ospite"
     guest_phone = str(row.get("guest_phone", "") or "").strip()
     platform = str(row.get("platform", "") or "").strip() or "Booking"
-
-    check_in_ts = pd.to_datetime(row.get("check_in"), errors="coerce")
-    check_out_ts = pd.to_datetime(row.get("check_out"), errors="coerce")
-    if pd.isna(check_in_ts) or pd.isna(check_out_ts) or check_out_ts <= check_in_ts:
-        return []
-
-    check_in = check_in_ts.to_pydatetime()
-    check_out = check_out_ts.to_pydatetime()
+    check_in = pd.to_datetime(row.get("check_in")).to_pydatetime()
+    check_out = pd.to_datetime(row.get("check_out")).to_pydatetime()
 
     booking_ref = f"{platform}|{guest_name}|{check_in.date().isoformat()}|{check_out.date().isoformat()}"
 
@@ -3044,24 +2967,8 @@ def replace_scheduled_messages_for_user(utente_id, bookings_df, profilo, schedul
     conn = get_conn()
     cur = conn.cursor()
 
-    bookings_df = ensure_booking_dataframe_columns(bookings_df)
-    if bookings_df.empty:
-        conn.close()
-        return 0
-
-    valid = bookings_df[bookings_df["status"].fillna("").astype(str).str.lower() != "cancelled"].copy()
-    valid["check_in_dt"] = pd.to_datetime(valid.get("check_in"), errors="coerce")
-    valid["check_out_dt"] = pd.to_datetime(valid.get("check_out"), errors="coerce")
-    valid = valid[
-        valid["check_in_dt"].notna()
-        & valid["check_out_dt"].notna()
-        & (valid["check_out_dt"] > valid["check_in_dt"])
-    ].copy()
-    if valid.empty:
-        conn.close()
-        return 0
-    valid = valid.sort_values(["check_in_dt", "check_out_dt", "guest_name"])
-    valid = valid.drop(columns=["check_in_dt", "check_out_dt"], errors="ignore")
+    valid = bookings_df[bookings_df["status"].str.lower() != "cancelled"].copy()
+    valid = valid.sort_values(["check_in", "check_out", "guest_name"])
 
     cur.execute(
         """
@@ -3177,34 +3084,25 @@ def replace_scheduled_messages_for_user(utente_id, bookings_df, profilo, schedul
 
 def load_scheduled_messages(utente_id):
     conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, booking_ref, platform, guest_name, guest_phone, check_in, check_out, message_type, send_at,
-                   channel, status, message_text, created_at, sent_at, error_message
-            FROM scheduled_messages
-            WHERE utente_id = ?
-            ORDER BY send_at ASC, id ASC
-            """,
-            (int(utente_id),),
-        )
-        rows = cur.fetchall()
-    finally:
-        conn.close()
+    query = """
+        SELECT id, booking_ref, platform, guest_name, guest_phone, check_in, check_out, message_type, send_at,
+               channel, status, message_text, created_at, sent_at, error_message
+        FROM scheduled_messages
+        WHERE utente_id = ?
+        ORDER BY send_at ASC, id ASC
+    """
+    df = pd.read_sql_query(query, conn, params=(utente_id,))
+    conn.close()
 
-    if not rows:
-        return pd.DataFrame(columns=[
-            "id", "booking_ref", "platform", "guest_name", "guest_phone", "check_in", "check_out",
-            "message_type", "send_at", "channel", "status", "message_text", "created_at", "sent_at", "error_message"
-        ])
+    if not df.empty:
+        df = df.copy()
+        check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
+        check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
+        send_at_dt = pd.to_datetime(df.get("send_at"), errors="coerce")
+        clean_mask = check_in_dt.notna() & check_out_dt.notna() & send_at_dt.notna()
+        df = df[clean_mask].copy()
+    return df
 
-    df = pd.DataFrame([dict(row) for row in rows])
-    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
-    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
-    send_at_dt = pd.to_datetime(df.get("send_at"), errors="coerce")
-    clean_mask = check_in_dt.notna() & check_out_dt.notna() & send_at_dt.notna()
-    return df[clean_mask].copy().reset_index(drop=True)
 
 def get_scheduled_message_by_id(message_id, utente_id):
     conn = get_conn()
@@ -3440,111 +3338,9 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.success("Layout tabella ripristinato.")
             st.rerun()
 
-    def _set_custom_action_error(message):
-        st.session_state["custom_booking_action_error"] = str(message)
-
-    def _handle_create_custom_booking():
-        try:
-            custom_guest_name_value = str(st.session_state.get("custom_booking_guest_name", "") or "").strip()
-            custom_check_in_value = st.session_state.get("custom_booking_check_in", date.today())
-            custom_check_out_value = st.session_state.get("custom_booking_check_out", date.today() + timedelta(days=1))
-
-            if not custom_guest_name_value:
-                _set_custom_action_error("Inserisci il nome ospite.")
-                return
-            if custom_check_out_value <= custom_check_in_value:
-                _set_custom_action_error("Il check-out deve essere successivo al check-in.")
-                return
-
-            custom_payload = {
-                "guest_name": custom_guest_name_value,
-                "guest_phone": st.session_state.get("custom_booking_guest_phone", ""),
-                "check_in": custom_check_in_value.isoformat(),
-                "check_out": custom_check_out_value.isoformat(),
-                "total_price": st.session_state.get("custom_booking_total_price", 0.0),
-                "cleaning_cost": st.session_state.get("custom_booking_cleaning_cost", 0.0),
-                "platform_fee": 0.0,
-                "transaction_cost": 0.0,
-                "raw_booking_status": st.session_state.get("custom_booking_status", "confirmed"),
-                "status": st.session_state.get("custom_booking_status", "confirmed"),
-                "guests": st.session_state.get("custom_booking_guests", 1),
-                "notes": st.session_state.get("custom_booking_notes", ""),
-            }
-            new_custom_id = save_custom_booking(user_id, custom_payload)
-            saved_row = get_custom_booking_by_id(user_id, new_custom_id)
-            if saved_row is None:
-                _set_custom_action_error("La prenotazione è stata inviata al database, ma non risulta rileggibile dopo il commit.")
-                return
-
-            check_in_saved = hf_date(saved_row.get("check_in")) or custom_check_in_value
-            merged_settings = carica_sidebar_settings(user_id)
-            merged_settings.update({
-                "dashboard_period_mode": "Mensile",
-                "selected_year": int(check_in_saved.year),
-                "selected_month": int(check_in_saved.month),
-            })
-            salva_sidebar_settings(user_id, merged_settings)
-            st.session_state["dashboard_period_mode"] = "Mensile"
-            st.session_state["selected_year"] = int(check_in_saved.year)
-            st.session_state["selected_month"] = int(check_in_saved.month)
-            st.session_state.pop("last_saved_custom_booking_payload", None)
-            st.session_state.pop("custom_booking_action_error", None)
-            st.session_state["custom_booking_saved_ok"] = (
-                f"Prenotazione custom salvata correttamente (ID {new_custom_id}). "
-                f"Dashboard aggiornata su {check_in_saved.strftime('%B %Y')}."
-            )
-        except Exception as exc:
-            _set_custom_action_error(f"Errore salvataggio prenotazione custom: {exc}")
-
-    def _handle_update_custom_booking(selected_custom_id):
-        try:
-            edit_guest_name_value = str(st.session_state.get(f"edit_custom_guest_name_{selected_custom_id}", "") or "").strip()
-            edit_check_in_value = st.session_state.get(f"edit_custom_check_in_{selected_custom_id}", date.today())
-            edit_check_out_value = st.session_state.get(f"edit_custom_check_out_{selected_custom_id}", date.today() + timedelta(days=1))
-
-            if not edit_guest_name_value:
-                _set_custom_action_error("Inserisci il nome ospite.")
-                return
-            if edit_check_out_value <= edit_check_in_value:
-                _set_custom_action_error("Il check-out deve essere successivo al check-in.")
-                return
-
-            ok = update_custom_booking(
-                user_id,
-                selected_custom_id,
-                {
-                    "guest_name": edit_guest_name_value,
-                    "guest_phone": st.session_state.get(f"edit_custom_guest_phone_{selected_custom_id}", ""),
-                    "check_in": edit_check_in_value.isoformat(),
-                    "check_out": edit_check_out_value.isoformat(),
-                    "total_price": st.session_state.get(f"edit_custom_total_price_{selected_custom_id}", 0.0),
-                    "cleaning_cost": st.session_state.get(f"edit_custom_cleaning_cost_{selected_custom_id}", 0.0),
-                    "platform_fee": 0.0,
-                    "transaction_cost": 0.0,
-                    "raw_booking_status": st.session_state.get(f"edit_custom_status_{selected_custom_id}", "confirmed"),
-                    "status": st.session_state.get(f"edit_custom_status_{selected_custom_id}", "confirmed"),
-                    "guests": st.session_state.get(f"edit_custom_guests_{selected_custom_id}", 1),
-                    "notes": st.session_state.get(f"edit_custom_notes_{selected_custom_id}", ""),
-                },
-            )
-            st.session_state.pop("custom_booking_action_error", None)
-            st.session_state["custom_booking_saved_ok"] = "Prenotazione custom aggiornata." if ok else "Nessuna modifica applicata."
-        except Exception as exc:
-            _set_custom_action_error(f"Errore aggiornamento prenotazione custom: {exc}")
-
-    def _handle_delete_custom_booking(selected_custom_id):
-        try:
-            ok = delete_custom_booking(user_id, selected_custom_id)
-            st.session_state.pop("custom_booking_action_error", None)
-            st.session_state["custom_booking_saved_ok"] = "Prenotazione custom eliminata." if ok else "Prenotazione custom non trovata."
-        except Exception as exc:
-            _set_custom_action_error(f"Errore eliminazione prenotazione custom: {exc}")
-
     custom_bookings_df = load_custom_bookings(user_id)
     if st.session_state.get("custom_booking_saved_ok"):
         st.success(st.session_state.pop("custom_booking_saved_ok"))
-    if st.session_state.get("custom_booking_action_error"):
-        st.error(st.session_state.pop("custom_booking_action_error"))
 
     with st.expander("Aggiungi prenotazione custom", expanded=False):
         st.caption("Usa questa sezione per aggiungere prenotazioni non arrivate da Booking. Verranno integrate nella dashboard e nelle altre analisi.")
@@ -3552,23 +3348,69 @@ def render_dashboard_dataframe(df_to_show, user_id):
         with st.form("custom_booking_create_form", clear_on_submit=False):
             cb1, cb2 = st.columns(2)
             with cb1:
-                st.text_input("Nome ospite", key="custom_booking_guest_name")
-                st.text_input("Telefono ospite", key="custom_booking_guest_phone")
-                st.date_input("Check-in", value=date.today(), key="custom_booking_check_in")
-                st.date_input("Check-out", value=date.today() + timedelta(days=1), key="custom_booking_check_out")
-                st.number_input("Numero ospiti", min_value=1, value=2, step=1, key="custom_booking_guests")
+                custom_guest_name = st.text_input("Nome ospite", key="custom_booking_guest_name")
+                custom_guest_phone = st.text_input("Telefono ospite", key="custom_booking_guest_phone")
+                custom_check_in = st.date_input("Check-in", value=date.today(), key="custom_booking_check_in")
+                custom_check_out = st.date_input("Check-out", value=date.today() + timedelta(days=1), key="custom_booking_check_out")
+                custom_guests = st.number_input("Numero ospiti", min_value=1, value=2, step=1, key="custom_booking_guests")
             with cb2:
-                st.number_input("Prezzo totale netto (€)", min_value=0.0, value=0.0, step=10.0, key="custom_booking_total_price")
+                custom_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=0.0, step=10.0, key="custom_booking_total_price")
                 st.caption("Per le prenotazioni custom questo importo viene considerato già netto: non applichiamo commissioni piattaforma.")
-                st.number_input("Pulizie (€)", min_value=0.0, value=float(cleaning_cost_default), step=5.0, key="custom_booking_cleaning_cost")
-                st.selectbox("Stato prenotazione", ["confirmed", "cancelled"], key="custom_booking_status")
+                custom_cleaning_cost = st.number_input("Pulizie (€)", min_value=0.0, value=float(cleaning_cost_default), step=5.0, key="custom_booking_cleaning_cost")
+                custom_status = st.selectbox("Stato prenotazione", ["confirmed", "cancelled"], key="custom_booking_status")
 
-            st.text_area("Note", key="custom_booking_notes", height=80)
-            st.form_submit_button(
-                "Salva prenotazione custom",
-                use_container_width=True,
-                on_click=_handle_create_custom_booking,
-            )
+            custom_notes = st.text_area("Note", key="custom_booking_notes", height=80)
+            create_custom_booking_clicked = st.form_submit_button("Salva prenotazione custom", use_container_width=True)
+
+        if create_custom_booking_clicked:
+            if not str(custom_guest_name).strip():
+                st.error("Inserisci il nome ospite.")
+            elif custom_check_out <= custom_check_in:
+                st.error("Il check-out deve essere successivo al check-in.")
+            else:
+                try:
+                    custom_payload = {
+                        "guest_name": custom_guest_name,
+                        "guest_phone": custom_guest_phone,
+                        "check_in": custom_check_in.isoformat(),
+                        "check_out": custom_check_out.isoformat(),
+                        "total_price": custom_total_price,
+                        "cleaning_cost": custom_cleaning_cost,
+                        "platform_fee": 0.0,
+                        "transaction_cost": 0.0,
+                        "raw_booking_status": custom_status,
+                        "status": custom_status,
+                        "guests": custom_guests,
+                        "notes": custom_notes,
+                    }
+                    new_custom_id = save_custom_booking(user_id, custom_payload)
+                    saved_row = get_custom_booking_by_id(user_id, new_custom_id)
+
+                    if saved_row is None:
+                        st.error("La prenotazione è stata inviata al database, ma non risulta rileggibile. Controlla DATABASE_URL/Postgres su Render.")
+                    else:
+                        check_in_saved = hf_date(saved_row.get("check_in")) or custom_check_in
+
+                        merged_settings = carica_sidebar_settings(user_id)
+                        merged_settings.update({
+                            "dashboard_period_mode": "Mensile",
+                            "selected_year": int(check_in_saved.year),
+                            "selected_month": int(check_in_saved.month),
+                        })
+                        salva_sidebar_settings(user_id, merged_settings)
+
+                        st.session_state.pop("last_saved_custom_booking_payload", None)
+                        st.session_state["pending_custom_booking_period"] = {
+                            "year": int(check_in_saved.year),
+                            "month": int(check_in_saved.month),
+                        }
+                        st.session_state["custom_booking_saved_ok"] = (
+                            f"Prenotazione custom salvata correttamente (ID {new_custom_id}). "
+                            f"Dashboard aggiornata su {check_in_saved.strftime('%B %Y')}."
+                        )
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Errore salvataggio prenotazione custom: {exc}")
 
         st.markdown("#### Prenotazioni custom inserite")
         if custom_bookings_df.empty:
@@ -3588,49 +3430,75 @@ def render_dashboard_dataframe(df_to_show, user_id):
 
             ec1, ec2 = st.columns(2)
             with ec1:
-                st.text_input("Nome ospite", value=str(selected_custom_row["guest_name"]), key=f"edit_custom_guest_name_{selected_custom_id}")
-                st.text_input(
+                edit_guest_name = st.text_input("Nome ospite", value=str(selected_custom_row["guest_name"]), key=f"edit_custom_guest_name_{selected_custom_id}")
+                edit_guest_phone = st.text_input(
                     "Telefono ospite",
                     value=str(selected_custom_row.get("guest_phone", "") or ""),
                     key=f"edit_custom_guest_phone_{selected_custom_id}"
                 )
-                st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
-                st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
-                st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
+                edit_check_in = st.date_input("Check-in", value=date_value_safe(selected_custom_row["check_in"]), key=f"edit_custom_check_in_{selected_custom_id}")
+                edit_check_out = st.date_input("Check-out", value=date_value_safe(selected_custom_row["check_out"], fallback=date.today() + timedelta(days=1)), key=f"edit_custom_check_out_{selected_custom_id}")
+                edit_guests = st.number_input("Numero ospiti", min_value=1, value=int(selected_custom_row["guests"]), step=1, key=f"edit_custom_guests_{selected_custom_id}")
             with ec2:
-                st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
-                st.number_input("Pulizie (€)", min_value=0.0, value=float(selected_custom_row["cleaning_cost"]), step=5.0, key=f"edit_custom_cleaning_cost_{selected_custom_id}")
+                edit_total_price = st.number_input("Prezzo totale netto (€)", min_value=0.0, value=float(selected_custom_row["total_price"]), step=10.0, key=f"edit_custom_total_price_{selected_custom_id}")
+                edit_cleaning_cost = st.number_input("Pulizie (€)", min_value=0.0, value=float(selected_custom_row["cleaning_cost"]), step=5.0, key=f"edit_custom_cleaning_cost_{selected_custom_id}")
                 current_status = str(selected_custom_row["status"])
                 status_options = ["confirmed", "cancelled"]
                 status_index = status_options.index(current_status) if current_status in status_options else 0
-                st.selectbox("Stato prenotazione", status_options, index=status_index, key=f"edit_custom_status_{selected_custom_id}")
+                edit_status = st.selectbox("Stato prenotazione", status_options, index=status_index, key=f"edit_custom_status_{selected_custom_id}")
 
-            st.text_area("Note", value=str(selected_custom_row.get("notes", "") or ""), height=80, key=f"edit_custom_notes_{selected_custom_id}")
+            edit_notes = st.text_area("Note", value=str(selected_custom_row.get("notes", "") or ""), height=80, key=f"edit_custom_notes_{selected_custom_id}")
 
             ea1, ea2 = st.columns(2)
             with ea1:
-                st.button(
-                    "Aggiorna prenotazione custom",
-                    use_container_width=True,
-                    key=f"update_custom_booking_button_{selected_custom_id}",
-                    on_click=_handle_update_custom_booking,
-                    args=(selected_custom_id,),
-                )
+                if st.button("Aggiorna prenotazione custom", use_container_width=True, key=f"update_custom_booking_button_{selected_custom_id}"):
+                    if not str(edit_guest_name).strip():
+                        st.error("Inserisci il nome ospite.")
+                    elif edit_check_out <= edit_check_in:
+                        st.error("Il check-out deve essere successivo al check-in.")
+                    else:
+                        ok = update_custom_booking(
+                            user_id,
+                            selected_custom_id,
+                            {
+                                "guest_name": edit_guest_name,
+                                "guest_phone": edit_guest_phone,
+                                "check_in": edit_check_in.isoformat(),
+                                "check_out": edit_check_out.isoformat(),
+                                "total_price": edit_total_price,
+                                "cleaning_cost": edit_cleaning_cost,
+                                "platform_fee": 0.0,
+                                "transaction_cost": 0.0,
+                                "raw_booking_status": edit_status,
+                                "status": edit_status,
+                                "guests": edit_guests,
+                                "notes": edit_notes,
+                            },
+                        )
+                        if ok:
+                            st.success("Prenotazione custom aggiornata.")
+                            st.rerun()
             with ea2:
-                st.button(
-                    "Elimina prenotazione custom",
-                    use_container_width=True,
-                    key=f"delete_custom_booking_button_{selected_custom_id}",
-                    on_click=_handle_delete_custom_booking,
-                    args=(selected_custom_id,),
-                )
+                if st.button("Elimina prenotazione custom", use_container_width=True, key=f"delete_custom_booking_button_{selected_custom_id}"):
+                    ok = delete_custom_booking(user_id, selected_custom_id)
+                    if ok:
+                        st.success("Prenotazione custom eliminata.")
+                        st.rerun()
 
 
-
-    visible_columns = saved_settings.get("dashboard_visible_columns", saved_visible_columns.copy())
+    visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
     visible_columns = [col for col in visible_columns if col in all_columns]
     if not visible_columns:
         visible_columns = saved_visible_columns.copy() if saved_visible_columns else all_columns.copy()
+
+    if df_to_show.empty:
+        all_custom_bookings_for_user = load_custom_bookings(user_id)
+        if not all_custom_bookings_for_user.empty:
+            st.info(
+                "La tabella sotto segue il periodo selezionato. "
+                "Hai prenotazioni custom salvate, ma nessuna rientra nel periodo attuale: "
+                "apri 'Aggiungi prenotazione custom' oppure cambia mese/periodo dalla sidebar."
+            )
 
     st.dataframe(df_to_show[visible_columns], width="stretch")
 
@@ -4021,74 +3889,81 @@ def render_profile_form(profilo, onboarding_mode=False):
     tipi = ["Appartamento intero", "Stanza privata", "Casa vacanze", "Altro"]
     fasce = ["Basic", "Standard", "Premium", "Luxury"]
 
-    st.markdown(f"#### {TESTI['immobile_blocco_dati']}")
-    col1, col2 = st.columns(2)
+    form_key = f"profile_form_{'onboarding' if onboarding_mode else 'tab'}"
+    with st.form(form_key, clear_on_submit=False):
+        st.markdown(f"#### {TESTI['immobile_blocco_dati']}")
+        col1, col2 = st.columns(2)
 
-    with col1:
-        property_name = st.text_input(campo_etichetta("nome_immobile"), profilo.get("nome_immobile", "")) if campo_visibile("nome_immobile") else profilo.get("nome_immobile", "")
-        address = st.text_input(campo_etichetta("indirizzo_completo"), profilo.get("indirizzo_completo", "")) if campo_visibile("indirizzo_completo") else profilo.get("indirizzo_completo", "")
-        city = st.text_input(campo_etichetta("citta"), profilo.get("citta", "")) if campo_visibile("citta") else profilo.get("citta", "")
-        cap = st.text_input(campo_etichetta("cap"), profilo.get("cap", "")) if campo_visibile("cap") else profilo.get("cap", "")
-        if campo_visibile("tipologia_immobile"):
-            property_type = st.selectbox(campo_etichetta("tipologia_immobile"), tipi, index=tipi.index(profilo.get("tipologia_immobile", "Appartamento intero")) if profilo.get("tipologia_immobile", "Appartamento intero") in tipi else 0)
-        else:
-            property_type = profilo.get("tipologia_immobile", "Appartamento intero")
+        with col1:
+            property_name = st.text_input(campo_etichetta("nome_immobile"), profilo.get("nome_immobile", "")) if campo_visibile("nome_immobile") else profilo.get("nome_immobile", "")
+            address = st.text_input(campo_etichetta("indirizzo_completo"), profilo.get("indirizzo_completo", "")) if campo_visibile("indirizzo_completo") else profilo.get("indirizzo_completo", "")
+            city = st.text_input(campo_etichetta("citta"), profilo.get("citta", "")) if campo_visibile("citta") else profilo.get("citta", "")
+            cap = st.text_input(campo_etichetta("cap"), profilo.get("cap", "")) if campo_visibile("cap") else profilo.get("cap", "")
+            if campo_visibile("tipologia_immobile"):
+                property_type = st.selectbox(campo_etichetta("tipologia_immobile"), tipi, index=tipi.index(profilo.get("tipologia_immobile", "Appartamento intero")) if profilo.get("tipologia_immobile", "Appartamento intero") in tipi else 0)
+            else:
+                property_type = profilo.get("tipologia_immobile", "Appartamento intero")
 
-    with col2:
-        max_guests = st.number_input(campo_etichetta("ospiti_massimi"), min_value=1, value=int(profilo.get("ospiti_massimi", 4)), step=1) if campo_visibile("ospiti_massimi") else int(profilo.get("ospiti_massimi", 4))
-        bedrooms = st.number_input(campo_etichetta("camere"), min_value=0, value=int(profilo.get("camere", 1)), step=1) if campo_visibile("camere") else int(profilo.get("camere", 1))
-        bathrooms = st.number_input(campo_etichetta("bagni"), min_value=0, value=int(profilo.get("bagni", 1)), step=1) if campo_visibile("bagni") else int(profilo.get("bagni", 1))
-        if campo_visibile("fascia_qualita"):
-            quality_band = st.selectbox(campo_etichetta("fascia_qualita"), fasce, index=fasce.index(profilo.get("fascia_qualita", "Basic")) if profilo.get("fascia_qualita", "Basic") in fasce else 0)
-        else:
-            quality_band = profilo.get("fascia_qualita", "Basic")
-        competitor_radius_km = st.number_input(campo_etichetta("raggio_competitor_km"), min_value=0.1, value=float(profilo.get("raggio_competitor_km", 1.0)), step=0.1) if campo_visibile("raggio_competitor_km") else float(profilo.get("raggio_competitor_km", 1.0))
+        with col2:
+            max_guests = st.number_input(campo_etichetta("ospiti_massimi"), min_value=1, value=int(profilo.get("ospiti_massimi", 4)), step=1) if campo_visibile("ospiti_massimi") else int(profilo.get("ospiti_massimi", 4))
+            bedrooms = st.number_input(campo_etichetta("camere"), min_value=0, value=int(profilo.get("camere", 1)), step=1) if campo_visibile("camere") else int(profilo.get("camere", 1))
+            bathrooms = st.number_input(campo_etichetta("bagni"), min_value=0, value=int(profilo.get("bagni", 1)), step=1) if campo_visibile("bagni") else int(profilo.get("bagni", 1))
+            if campo_visibile("fascia_qualita"):
+                quality_band = st.selectbox(campo_etichetta("fascia_qualita"), fasce, index=fasce.index(profilo.get("fascia_qualita", "Basic")) if profilo.get("fascia_qualita", "Basic") in fasce else 0)
+            else:
+                quality_band = profilo.get("fascia_qualita", "Basic")
+            competitor_radius_km = st.number_input(campo_etichetta("raggio_competitor_km"), min_value=0.1, value=float(profilo.get("raggio_competitor_km", 1.0)), step=0.1) if campo_visibile("raggio_competitor_km") else float(profilo.get("raggio_competitor_km", 1.0))
 
-    st.markdown(f"#### {TESTI['immobile_blocco_messaggi']}")
-    col3, col4 = st.columns(2)
+        st.markdown(f"#### {TESTI['immobile_blocco_messaggi']}")
+        col3, col4 = st.columns(2)
 
-    with col3:
-        nome_host = st.text_input(campo_etichetta("nome_host"), profilo.get("nome_host", "")) if campo_visibile("nome_host") else profilo.get("nome_host", "")
-        numero_whatsapp = st.text_input(campo_etichetta("numero_whatsapp"), profilo.get("numero_whatsapp", "")) if campo_visibile("numero_whatsapp") else profilo.get("numero_whatsapp", "")
-        checkin_da = st.text_input(campo_etichetta("checkin_da"), profilo.get("checkin_da", "15:00")) if campo_visibile("checkin_da") else profilo.get("checkin_da", "15:00")
-        checkin_fino = st.text_input(campo_etichetta("checkin_fino"), profilo.get("checkin_fino", "22:00")) if campo_visibile("checkin_fino") else profilo.get("checkin_fino", "22:00")
-        checkout_entro = st.text_input(campo_etichetta("checkout_entro"), profilo.get("checkout_entro", "10:00")) if campo_visibile("checkout_entro") else profilo.get("checkout_entro", "10:00")
-        wifi_nome = st.text_input(campo_etichetta("wifi_nome"), profilo.get("wifi_nome", "")) if campo_visibile("wifi_nome") else profilo.get("wifi_nome", "")
-        wifi_password = st.text_input(campo_etichetta("wifi_password"), profilo.get("wifi_password", "")) if campo_visibile("wifi_password") else profilo.get("wifi_password", "")
+        with col3:
+            nome_host = st.text_input(campo_etichetta("nome_host"), profilo.get("nome_host", "")) if campo_visibile("nome_host") else profilo.get("nome_host", "")
+            numero_whatsapp = st.text_input(campo_etichetta("numero_whatsapp"), profilo.get("numero_whatsapp", "")) if campo_visibile("numero_whatsapp") else profilo.get("numero_whatsapp", "")
+            checkin_da = st.text_input(campo_etichetta("checkin_da"), profilo.get("checkin_da", "15:00")) if campo_visibile("checkin_da") else profilo.get("checkin_da", "15:00")
+            checkin_fino = st.text_input(campo_etichetta("checkin_fino"), profilo.get("checkin_fino", "22:00")) if campo_visibile("checkin_fino") else profilo.get("checkin_fino", "22:00")
+            checkout_entro = st.text_input(campo_etichetta("checkout_entro"), profilo.get("checkout_entro", "10:00")) if campo_visibile("checkout_entro") else profilo.get("checkout_entro", "10:00")
+            wifi_nome = st.text_input(campo_etichetta("wifi_nome"), profilo.get("wifi_nome", "")) if campo_visibile("wifi_nome") else profilo.get("wifi_nome", "")
+            wifi_password = st.text_input(campo_etichetta("wifi_password"), profilo.get("wifi_password", "")) if campo_visibile("wifi_password") else profilo.get("wifi_password", "")
 
-    with col4:
-        animali_ammessi = st.checkbox(campo_etichetta("animali_ammessi"), value=bool(profilo.get("animali_ammessi", False))) if campo_visibile("animali_ammessi") else bool(profilo.get("animali_ammessi", False))
-        fumatori_ammessi = st.checkbox(campo_etichetta("fumatori_ammessi"), value=bool(profilo.get("fumatori_ammessi", False))) if campo_visibile("fumatori_ammessi") else bool(profilo.get("fumatori_ammessi", False))
-        parcheggio_disponibile = st.checkbox(campo_etichetta("parcheggio_disponibile"), value=bool(profilo.get("parcheggio_disponibile", False))) if campo_visibile("parcheggio_disponibile") else bool(profilo.get("parcheggio_disponibile", False))
-        tassa_soggiorno_profilo = st.number_input(campo_etichetta("tassa_soggiorno"), min_value=0.0, value=float(profilo.get("tassa_soggiorno", 4.0)), step=0.5) if campo_visibile("tassa_soggiorno") else float(profilo.get("tassa_soggiorno", 4.0))
+        with col4:
+            animali_ammessi = st.checkbox(campo_etichetta("animali_ammessi"), value=bool(profilo.get("animali_ammessi", False))) if campo_visibile("animali_ammessi") else bool(profilo.get("animali_ammessi", False))
+            fumatori_ammessi = st.checkbox(campo_etichetta("fumatori_ammessi"), value=bool(profilo.get("fumatori_ammessi", False))) if campo_visibile("fumatori_ammessi") else bool(profilo.get("fumatori_ammessi", False))
+            parcheggio_disponibile = st.checkbox(campo_etichetta("parcheggio_disponibile"), value=bool(profilo.get("parcheggio_disponibile", False))) if campo_visibile("parcheggio_disponibile") else bool(profilo.get("parcheggio_disponibile", False))
+            tassa_soggiorno_profilo = st.number_input(campo_etichetta("tassa_soggiorno"), min_value=0.0, value=float(profilo.get("tassa_soggiorno", 4.0)), step=0.5) if campo_visibile("tassa_soggiorno") else float(profilo.get("tassa_soggiorno", 4.0))
 
-    nuovi_dati = {
-        "nome_immobile": property_name,
-        "indirizzo_completo": address,
-        "citta": city,
-        "cap": cap,
-        "tipologia_immobile": property_type,
-        "ospiti_massimi": max_guests,
-        "camere": bedrooms,
-        "bagni": bathrooms,
-        "fascia_qualita": quality_band,
-        "raggio_competitor_km": competitor_radius_km,
-        "nome_host": nome_host,
-        "numero_whatsapp": numero_whatsapp,
-        "checkin_da": checkin_da,
-        "checkin_fino": checkin_fino,
-        "checkout_entro": checkout_entro,
-        "wifi_nome": wifi_nome,
-        "wifi_password": wifi_password,
-        "animali_ammessi": animali_ammessi,
-        "fumatori_ammessi": fumatori_ammessi,
-        "parcheggio_disponibile": parcheggio_disponibile,
-        "tassa_soggiorno": tassa_soggiorno_profilo,
-        "istruzioni_ingresso": profilo.get("istruzioni_ingresso", ""),
-        "note_finali": profilo.get("note_finali", ""),
-    }
+        nuovi_dati = {
+            "nome_immobile": property_name,
+            "indirizzo_completo": address,
+            "citta": city,
+            "cap": cap,
+            "tipologia_immobile": property_type,
+            "ospiti_massimi": max_guests,
+            "camere": bedrooms,
+            "bagni": bathrooms,
+            "fascia_qualita": quality_band,
+            "raggio_competitor_km": competitor_radius_km,
+            "nome_host": nome_host,
+            "numero_whatsapp": numero_whatsapp,
+            "checkin_da": checkin_da,
+            "checkin_fino": checkin_fino,
+            "checkout_entro": checkout_entro,
+            "wifi_nome": wifi_nome,
+            "wifi_password": wifi_password,
+            "animali_ammessi": animali_ammessi,
+            "fumatori_ammessi": fumatori_ammessi,
+            "parcheggio_disponibile": parcheggio_disponibile,
+            "tassa_soggiorno": tassa_soggiorno_profilo,
+            "istruzioni_ingresso": profilo.get("istruzioni_ingresso", ""),
+            "note_finali": profilo.get("note_finali", ""),
+        }
 
-    if st.button(TESTI["immobile_salva_bottone"], use_container_width=True, key=f"save_profile_{'onboarding' if onboarding_mode else 'tab'}"):
+        submitted = st.form_submit_button(
+            TESTI["immobile_salva_bottone"],
+            use_container_width=True,
+        )
+
+    if submitted:
         if not profilo_completo(nuovi_dati):
             st.error(TESTI["errore_campi_onboarding"])
         else:
@@ -4144,10 +4019,11 @@ if st.session_state.utente is None:
 profilo = st.session_state.profilo_immobile or carica_profilo_immobile(st.session_state.utente["id"])
 st.session_state.profilo_immobile = profilo
 inizializza_sidebar_state(st.session_state.utente["id"])
+apply_pending_dashboard_period_from_custom_save()
 st.session_state.cleaning_cost_default = 0.0
 st.session_state.monthly_cleaning_cost = 0.0
 
-if st.session_state.get("auth_token") and st.query_params.get("session") != st.session_state["auth_token"]:
+if st.session_state.get("auth_token"):
     st.query_params["session"] = st.session_state["auth_token"]
 
 if st.session_state.get("file_prenotazioni_virtuale") is None:
@@ -4193,6 +4069,7 @@ with st.sidebar:
             st.session_state.file_prenotazioni_virtuale = buffer_file
             st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
             st.session_state.file_prenotazioni_signature = uploaded_signature
+            st.rerun()
 
     uploaded_file = st.session_state.get("file_prenotazioni_virtuale")
 
@@ -4320,8 +4197,7 @@ with st.sidebar:
                 key="custom_end_date"
             )
 
-    current_sidebar_settings = carica_sidebar_settings(st.session_state.utente["id"])
-    merged_sidebar_settings = dict(current_sidebar_settings)
+    merged_sidebar_settings = carica_sidebar_settings(st.session_state.utente["id"])
     merged_sidebar_settings.update({
         "import_mode": import_mode,
         "cleaning_mode": cleaning_mode,
@@ -4342,8 +4218,7 @@ with st.sidebar:
         "custom_start_date": custom_start_date.isoformat() if hasattr(custom_start_date, "isoformat") else str(custom_start_date),
         "custom_end_date": custom_end_date.isoformat() if hasattr(custom_end_date, "isoformat") else str(custom_end_date),
     })
-    if merged_sidebar_settings != current_sidebar_settings:
-        salva_sidebar_settings(st.session_state.utente["id"], merged_sidebar_settings)
+    salva_sidebar_settings(st.session_state.utente["id"], merged_sidebar_settings)
 
     st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
     if st.button("Logout", use_container_width=True, key="logout_sidebar_bottom"):
@@ -4380,14 +4255,7 @@ if uploaded_file or not custom_bookings_df.empty:
         if uploaded_file:
             if hasattr(uploaded_file, "seek"):
                 uploaded_file.seek(0)
-            uploaded_file_bytes = uploaded_file.getvalue()
-            uploaded_file_name = getattr(uploaded_file, "name", st.session_state.get("file_prenotazioni_nome") or "prenotazioni.xlsx")
-            raw_df = load_data_cached_from_bytes(
-                uploaded_file_bytes,
-                uploaded_file_name,
-                float(cleaning_cost_default),
-                import_mode,
-            )
+            raw_df = load_data(uploaded_file, cleaning_cost_default, import_mode)
 
         merged_raw_df = merge_booking_sources(raw_df, custom_bookings_df)
         df = enrich_financials(
@@ -4643,14 +4511,6 @@ if "messaggi" in tab_map:
             st.subheader(TESTI["messaggi_titolo"])
             st.caption("Qui configuri i template e gestisci solo i messaggi davvero utili da controllare adesso.")
 
-            generate_button_col, _ = st.columns([1, 2.6])
-            with generate_button_col:
-                generate_clicked = st.button(
-                    "Genera / aggiorna messaggi programmati",
-                    use_container_width=True,
-                    key="generate_scheduled_messages_top",
-                )
-
             current_message_settings = {
                 "msg_rule_confirm_offset_days": int(st.session_state.get("msg_rule_confirm_offset_days", 0)),
                 "msg_rule_confirm_time": str(st.session_state.get("msg_rule_confirm_time", "10:00")),
@@ -4749,83 +4609,93 @@ if "messaggi" in tab_map:
                             args=("template_review_request_editor", "template_review_request"),
                         )
 
+
+            generate_clicked = False
+
             if needs_regeneration:
                 st.warning("Hai modificato regole o template. Attiva 'Mostra template' e premi 'Genera / aggiorna messaggi programmati' per aggiornare i messaggi già creati.")
 
             st.markdown("### Orari messaggi")
-            reg1, reg2 = st.columns(2)
+            st.caption("Modifica gli orari liberamente: la pagina non ricalcola finché non premi il bottone sotto.")
+            with st.form("message_rules_generate_form", clear_on_submit=False):
+                reg1, reg2 = st.columns(2)
 
-            with reg1:
-                st.markdown("**Conferma prenotazione**")
-                conf1, conf2 = st.columns([1, 1.2])
-                with conf1:
-                    confirm_offset_days = st.number_input(
-                        "Giorni prima / stesso giorno",
-                        min_value=0,
-                        max_value=30,
-                        step=1,
-                        key="msg_rule_confirm_offset_days"
-                    )
-                with conf2:
-                    confirm_time = st.text_input(
-                        "Orario conferma prenotazione",
-                        key="msg_rule_confirm_time"
+                with reg1:
+                    st.markdown("**Conferma prenotazione**")
+                    conf1, conf2 = st.columns([1, 1.2])
+                    with conf1:
+                        confirm_offset_days = st.number_input(
+                            "Giorni prima / stesso giorno",
+                            min_value=0,
+                            max_value=30,
+                            step=1,
+                            key="msg_rule_confirm_offset_days"
+                        )
+                    with conf2:
+                        confirm_time = st.text_input(
+                            "Orario conferma prenotazione",
+                            key="msg_rule_confirm_time"
+                        )
+
+                    st.markdown("**Reminder check-in**")
+                    rc1, rc2 = st.columns([1, 1.2])
+                    with rc1:
+                        checkin_reminder_days = st.number_input(
+                            "Giorni prima",
+                            min_value=0,
+                            max_value=30,
+                            step=1,
+                            key="msg_rule_checkin_reminder_days"
+                        )
+                    with rc2:
+                        checkin_reminder_time = st.text_input(
+                            "Orario reminder check-in",
+                            key="msg_rule_checkin_reminder_time"
+                        )
+
+                    st.markdown("**Istruzioni check-in**")
+                    checkin_instr_time = st.text_input(
+                        "Orario del giorno check-in",
+                        key="msg_rule_checkin_instr_time"
                     )
 
-                st.markdown("**Reminder check-in**")
-                rc1, rc2 = st.columns([1, 1.2])
-                with rc1:
-                    checkin_reminder_days = st.number_input(
-                        "Giorni prima",
-                        min_value=0,
-                        max_value=30,
-                        step=1,
-                        key="msg_rule_checkin_reminder_days"
-                    )
-                with rc2:
-                    checkin_reminder_time = st.text_input(
-                        "Orario reminder check-in",
-                        key="msg_rule_checkin_reminder_time"
-                    )
+                with reg2:
+                    st.markdown("**Reminder check-out**")
+                    rco1, rco2 = st.columns([1, 1.2])
+                    with rco1:
+                        checkout_reminder_days = st.number_input(
+                            "Giorni prima",
+                            min_value=0,
+                            max_value=30,
+                            step=1,
+                            key="msg_rule_checkout_reminder_days"
+                        )
+                    with rco2:
+                        checkout_reminder_time = st.text_input(
+                            "Orario reminder check-out",
+                            key="msg_rule_checkout_reminder_time"
+                        )
 
-                st.markdown("**Istruzioni check-in**")
-                checkin_instr_time = st.text_input(
-                    "Orario del giorno check-in",
-                    key="msg_rule_checkin_instr_time"
+                    st.markdown("**Richiesta recensione**")
+                    rr1, rr2 = st.columns([1, 1.2])
+                    with rr1:
+                        review_days_after = st.number_input(
+                            "Giorni dopo il check-out",
+                            min_value=0,
+                            max_value=30,
+                            step=1,
+                            key="msg_rule_review_days_after"
+                        )
+                    with rr2:
+                        review_time = st.text_input(
+                            "Orario richiesta recensione",
+                            key="msg_rule_review_time"
+                        )
+
+                generate_clicked = st.form_submit_button(
+                    "Genera / aggiorna messaggi programmati",
+                    use_container_width=True,
                 )
-
-            with reg2:
-                st.markdown("**Reminder check-out**")
-                rco1, rco2 = st.columns([1, 1.2])
-                with rco1:
-                    checkout_reminder_days = st.number_input(
-                        "Giorni prima",
-                        min_value=0,
-                        max_value=30,
-                        step=1,
-                        key="msg_rule_checkout_reminder_days"
-                    )
-                with rco2:
-                    checkout_reminder_time = st.text_input(
-                        "Orario reminder check-out",
-                        key="msg_rule_checkout_reminder_time"
-                    )
-
-                st.markdown("**Richiesta recensione**")
-                rr1, rr2 = st.columns([1, 1.2])
-                with rr1:
-                    review_days_after = st.number_input(
-                        "Giorni dopo il check-out",
-                        min_value=0,
-                        max_value=30,
-                        step=1,
-                        key="msg_rule_review_days_after"
-                    )
-                with rr2:
-                    review_time = st.text_input(
-                        "Orario richiesta recensione",
-                        key="msg_rule_review_time"
-                    )
 
             scheduling_rules = {
                 "confirm_offset_days": confirm_offset_days,
@@ -4853,9 +4723,8 @@ if "messaggi" in tab_map:
                 "review_request": template_review_request,
             }
 
-            messages_bookings_df = build_complete_bookings_for_messages(st.session_state.utente["id"], df)
             auto_messages_signature_key = f"scheduled_messages_bookings_signature_{st.session_state.utente['id']}"
-            current_bookings_signature = build_bookings_auto_signature(messages_bookings_df)
+            current_bookings_signature = build_bookings_auto_signature(df)
 
             # Non rigeneriamo automaticamente i messaggi a ogni modifica prenotazione.
             # Evita il doppio caricamento: i messaggi si aggiornano dal bottone dedicato.
@@ -4900,7 +4769,7 @@ if "messaggi" in tab_map:
                 )
                 totale = replace_scheduled_messages_for_user(
                     st.session_state.utente["id"],
-                    messages_bookings_df,
+                    df,
                     profilo,
                     scheduling_rules=scheduling_rules,
                     template_base=template_base,
@@ -4910,9 +4779,7 @@ if "messaggi" in tab_map:
                 st.success(f"Messaggi programmati aggiornati: {totale}")
 
             scheduled_df = load_scheduled_messages(st.session_state.utente["id"])
-            valid = messages_bookings_df[messages_bookings_df["status"].fillna("").astype(str).str.lower() != "cancelled"].copy()
-            valid["check_in_dt"] = pd.to_datetime(valid.get("check_in"), errors="coerce")
-            valid = valid[valid["check_in_dt"].notna()].sort_values("check_in_dt").drop(columns=["check_in_dt"], errors="ignore")
+            valid = df[df["status"].str.lower() != "cancelled"].sort_values("check_in")
 
             if not scheduled_df.empty:
                 valid_keys = set(valid.apply(booking_key_safe, axis=1))

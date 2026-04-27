@@ -5325,6 +5325,12 @@ if "pulizie_servizi" in tab_map:
 
             st.markdown("### Modifica pulizie")
             cleaning_df = load_cleaning_services(st.session_state.utente["id"])
+            if not cleaning_df.empty and "id" in cleaning_df.columns:
+                cleaning_df = cleaning_df.copy()
+                cleaning_df["id"] = pd.to_numeric(cleaning_df["id"], errors="coerce")
+                cleaning_df = cleaning_df[cleaning_df["id"].notna()].copy()
+                cleaning_df["id"] = cleaning_df["id"].astype(int)
+
             if cleaning_df.empty:
                 st.info("Nessun servizio pulizia registrato.")
             else:
@@ -5332,11 +5338,11 @@ if "pulizie_servizi" in tab_map:
                 with action_col1:
                     selected_cleaning_id = st.selectbox(
                         "Seleziona servizio da modificare",
-                        options=cleaning_df["id"].astype(int).tolist(),
+                        options=cleaning_df["id"].tolist(),
                         format_func=lambda sid: (
                             f'#{int(sid)} · '
-                            f'{cleaning_df.loc[cleaning_df["id"] == sid, "guest_name"].iloc[0]} · '
-                            f'{pd.to_datetime(cleaning_df.loc[cleaning_df["id"] == sid, "service_date"], errors="coerce").dt.strftime("%d/%m/%Y").iloc[0]}'
+                            f'{cleaning_df.loc[cleaning_df["id"] == int(sid), "guest_name"].iloc[0]} · '
+                            f'{pd.to_datetime(cleaning_df.loc[cleaning_df["id"] == int(sid), "service_date"], errors="coerce").dt.strftime("%d/%m/%Y").iloc[0]}'
                         ),
                         key="selected_cleaning_service_id",
                     )
