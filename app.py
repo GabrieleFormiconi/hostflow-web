@@ -3544,7 +3544,7 @@ def render_dashboard_dataframe(df_to_show, user_id):
                 salva_sidebar_settings(user_id, merged_settings)
                 st.session_state[manager_key] = False
                 st.success("Layout tabella salvato.")
-                # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                st.rerun()
 
         if reset_layout_clicked:
             merged_settings = carica_sidebar_settings(user_id)
@@ -3554,11 +3554,113 @@ def render_dashboard_dataframe(df_to_show, user_id):
             st.session_state[selector_key] = all_columns.copy()
             st.session_state[manager_key] = False
             st.success("Layout tabella ripristinato.")
-            # st.rerun() rimosso: il click del widget fa già un rerun automatico
+            st.rerun()
+
+    def _set_custom_action_error(message):
+        st.session_state["custom_booking_action_error"] = str(message)
+
+    def _handle_create_custom_booking():
+        try:
+            custom_guest_name_value = str(st.session_state.get("custom_booking_guest_name", "") or "").strip()
+            custom_check_in_value = st.session_state.get("custom_booking_check_in", date.today())
+            custom_check_out_value = st.session_state.get("custom_booking_check_out", date.today() + timedelta(days=1))
+
+            if not custom_guest_name_value:
+                _set_custom_action_error("Inserisci il nome ospite.")
+                return
+            if custom_check_out_value <= custom_check_in_value:
+                _set_custom_action_error("Il check-out deve essere successivo al check-in.")
+                return
+
+            custom_payload = {
+                "guest_name": custom_guest_name_value,
+                "guest_phone": st.session_state.get("custom_booking_guest_phone", ""),
+                "check_in": custom_check_in_value.isoformat(),
+                "check_out": custom_check_out_value.isoformat(),
+                "total_price": st.session_state.get("custom_booking_total_price", 0.0),
+                "cleaning_cost": st.session_state.get("custom_booking_cleaning_cost", 0.0),
+                "platform_fee": 0.0,
+                "transaction_cost": 0.0,
+                "raw_booking_status": st.session_state.get("custom_booking_status", "confirmed"),
+                "status": st.session_state.get("custom_booking_status", "confirmed"),
+                "guests": st.session_state.get("custom_booking_guests", 1),
+                "notes": st.session_state.get("custom_booking_notes", ""),
+            }
+            new_custom_id = save_custom_booking(user_id, custom_payload)
+            saved_row = get_custom_booking_by_id(user_id, new_custom_id)
+            if saved_row is None:
+                _set_custom_action_error("La prenotazione è stata inviata al database, ma non risulta rileggibile. Controlla DATABASE_URL/Postgres su Render.")
+                return
+
+            check_in_saved = hf_date(saved_row.get("check_in")) or custom_check_in_value
+            merged_settings = carica_sidebar_settings(user_id)
+            merged_settings.update({
+                "dashboard_period_mode": "Mensile",
+                "selected_year": int(check_in_saved.year),
+                "selected_month": int(check_in_saved.month),
+            })
+            salva_sidebar_settings(user_id, merged_settings)
+            st.session_state["dashboard_period_mode"] = "Mensile"
+            st.session_state["selected_year"] = int(check_in_saved.year)
+            st.session_state["selected_month"] = int(check_in_saved.month)
+            st.session_state.pop("last_saved_custom_booking_payload", None)
+            st.session_state.pop("custom_booking_action_error", None)
+            st.session_state["custom_booking_saved_ok"] = (
+                f"Prenotazione custom salvata correttamente (ID {new_custom_id}). "
+                f"Dashboard aggiornata su {check_in_saved.strftime('%B %Y')}."
+            )
+        except Exception as exc:
+            _set_custom_action_error(f"Errore salvataggio prenotazione custom: {exc}")
+
+    def _handle_update_custom_booking(selected_custom_id):
+        try:
+            edit_guest_name_value = str(st.session_state.get(f"edit_custom_guest_name_{selected_custom_id}", "") or "").strip()
+            edit_check_in_value = st.session_state.get(f"edit_custom_check_in_{selected_custom_id}", date.today())
+            edit_check_out_value = st.session_state.get(f"edit_custom_check_out_{selected_custom_id}", date.today() + timedelta(days=1))
+
+            if not edit_guest_name_value:
+                _set_custom_action_error("Inserisci il nome ospite.")
+                return
+            if edit_check_out_value <= edit_check_in_value:
+                _set_custom_action_error("Il check-out deve essere successivo al check-in.")
+                return
+
+            ok = update_custom_booking(
+                user_id,
+                selected_custom_id,
+                {
+                    "guest_name": edit_guest_name_value,
+                    "guest_phone": st.session_state.get(f"edit_custom_guest_phone_{selected_custom_id}", ""),
+                    "check_in": edit_check_in_value.isoformat(),
+                    "check_out": edit_check_out_value.isoformat(),
+                    "total_price": st.session_state.get(f"edit_custom_total_price_{selected_custom_id}", 0.0),
+                    "cleaning_cost": st.session_state.get(f"edit_custom_cleaning_cost_{selected_custom_id}", 0.0),
+                    "platform_fee": 0.0,
+                    "transaction_cost": 0.0,
+                    "raw_booking_status": st.session_state.get(f"edit_custom_status_{selected_custom_id}", "confirmed"),
+                    "status": st.session_state.get(f"edit_custom_status_{selected_custom_id}", "confirmed"),
+                    "guests": st.session_state.get(f"edit_custom_guests_{selected_custom_id}", 1),
+                    "notes": st.session_state.get(f"edit_custom_notes_{selected_custom_id}", ""),
+                },
+            )
+            st.session_state.pop("custom_booking_action_error", None)
+            st.session_state["custom_booking_saved_ok"] = "Prenotazione custom aggiornata." if ok else "Nessuna modifica applicata."
+        except Exception as exc:
+            _set_custom_action_error(f"Errore aggiornamento prenotazione custom: {exc}")
+
+    def _handle_delete_custom_booking(selected_custom_id):
+        try:
+            ok = delete_custom_booking(user_id, selected_custom_id)
+            st.session_state.pop("custom_booking_action_error", None)
+            st.session_state["custom_booking_saved_ok"] = "Prenotazione custom eliminata." if ok else "Prenotazione custom non trovata."
+        except Exception as exc:
+            _set_custom_action_error(f"Errore eliminazione prenotazione custom: {exc}")
 
     custom_bookings_df = load_custom_bookings(user_id)
     if st.session_state.get("custom_booking_saved_ok"):
         st.success(st.session_state.pop("custom_booking_saved_ok"))
+    if st.session_state.get("custom_booking_action_error"):
+        st.error(st.session_state.pop("custom_booking_action_error"))
 
     with st.expander("Aggiungi prenotazione custom", expanded=False):
         st.caption("Usa questa sezione per aggiungere prenotazioni non arrivate da Booking. Verranno integrate nella dashboard e nelle altre analisi.")
@@ -3578,57 +3680,11 @@ def render_dashboard_dataframe(df_to_show, user_id):
                 custom_status = st.selectbox("Stato prenotazione", ["confirmed", "cancelled"], key="custom_booking_status")
 
             custom_notes = st.text_area("Note", key="custom_booking_notes", height=80)
-            create_custom_booking_clicked = st.form_submit_button("Salva prenotazione custom", use_container_width=True)
-
-        if create_custom_booking_clicked:
-            if not str(custom_guest_name).strip():
-                st.error("Inserisci il nome ospite.")
-            elif custom_check_out <= custom_check_in:
-                st.error("Il check-out deve essere successivo al check-in.")
-            else:
-                try:
-                    custom_payload = {
-                        "guest_name": custom_guest_name,
-                        "guest_phone": custom_guest_phone,
-                        "check_in": custom_check_in.isoformat(),
-                        "check_out": custom_check_out.isoformat(),
-                        "total_price": custom_total_price,
-                        "cleaning_cost": custom_cleaning_cost,
-                        "platform_fee": 0.0,
-                        "transaction_cost": 0.0,
-                        "raw_booking_status": custom_status,
-                        "status": custom_status,
-                        "guests": custom_guests,
-                        "notes": custom_notes,
-                    }
-                    new_custom_id = save_custom_booking(user_id, custom_payload)
-                    saved_row = get_custom_booking_by_id(user_id, new_custom_id)
-
-                    if saved_row is None:
-                        st.error("La prenotazione è stata inviata al database, ma non risulta rileggibile. Controlla DATABASE_URL/Postgres su Render.")
-                    else:
-                        check_in_saved = hf_date(saved_row.get("check_in")) or custom_check_in
-
-                        merged_settings = carica_sidebar_settings(user_id)
-                        merged_settings.update({
-                            "dashboard_period_mode": "Mensile",
-                            "selected_year": int(check_in_saved.year),
-                            "selected_month": int(check_in_saved.month),
-                        })
-                        salva_sidebar_settings(user_id, merged_settings)
-
-                        st.session_state.pop("last_saved_custom_booking_payload", None)
-                        st.session_state["pending_custom_booking_period"] = {
-                            "year": int(check_in_saved.year),
-                            "month": int(check_in_saved.month),
-                        }
-                        st.session_state["custom_booking_saved_ok"] = (
-                            f"Prenotazione custom salvata correttamente (ID {new_custom_id}). "
-                            f"Dashboard aggiornata su {check_in_saved.strftime('%B %Y')}."
-                        )
-                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
-                except Exception as exc:
-                    st.error(f"Errore salvataggio prenotazione custom: {exc}")
+            st.form_submit_button(
+                "Salva prenotazione custom",
+                use_container_width=True,
+                on_click=_handle_create_custom_booking,
+            )
 
         st.markdown("#### Prenotazioni custom inserite")
         if custom_bookings_df.empty:
@@ -3669,39 +3725,22 @@ def render_dashboard_dataframe(df_to_show, user_id):
 
             ea1, ea2 = st.columns(2)
             with ea1:
-                if st.button("Aggiorna prenotazione custom", use_container_width=True, key=f"update_custom_booking_button_{selected_custom_id}"):
-                    if not str(edit_guest_name).strip():
-                        st.error("Inserisci il nome ospite.")
-                    elif edit_check_out <= edit_check_in:
-                        st.error("Il check-out deve essere successivo al check-in.")
-                    else:
-                        ok = update_custom_booking(
-                            user_id,
-                            selected_custom_id,
-                            {
-                                "guest_name": edit_guest_name,
-                                "guest_phone": edit_guest_phone,
-                                "check_in": edit_check_in.isoformat(),
-                                "check_out": edit_check_out.isoformat(),
-                                "total_price": edit_total_price,
-                                "cleaning_cost": edit_cleaning_cost,
-                                "platform_fee": 0.0,
-                                "transaction_cost": 0.0,
-                                "raw_booking_status": edit_status,
-                                "status": edit_status,
-                                "guests": edit_guests,
-                                "notes": edit_notes,
-                            },
-                        )
-                        if ok:
-                            st.success("Prenotazione custom aggiornata.")
-                            # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                st.button(
+                    "Aggiorna prenotazione custom",
+                    use_container_width=True,
+                    key=f"update_custom_booking_button_{selected_custom_id}",
+                    on_click=_handle_update_custom_booking,
+                    args=(selected_custom_id,),
+                )
             with ea2:
-                if st.button("Elimina prenotazione custom", use_container_width=True, key=f"delete_custom_booking_button_{selected_custom_id}"):
-                    ok = delete_custom_booking(user_id, selected_custom_id)
-                    if ok:
-                        st.success("Prenotazione custom eliminata.")
-                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                st.button(
+                    "Elimina prenotazione custom",
+                    use_container_width=True,
+                    key=f"delete_custom_booking_button_{selected_custom_id}",
+                    on_click=_handle_delete_custom_booking,
+                    args=(selected_custom_id,),
+                )
+
 
 
     visible_columns = carica_sidebar_settings(user_id).get("dashboard_visible_columns", saved_visible_columns.copy())
@@ -4287,7 +4326,7 @@ with st.sidebar:
             st.session_state.file_prenotazioni_virtuale = buffer_file
             st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
             st.session_state.file_prenotazioni_signature = uploaded_signature
-            # st.rerun() rimosso: il click del widget fa già un rerun automatico
+            st.rerun()
 
     uploaded_file = st.session_state.get("file_prenotazioni_virtuale")
 
@@ -5245,7 +5284,7 @@ if "messaggi" in tab_map:
                                                 st.success("Messaggio rimesso in attesa di invio.")
 
 
-                                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                                                st.rerun()
 
 
                                     with action2:
@@ -5281,7 +5320,7 @@ if "messaggi" in tab_map:
                                                 st.info("Messaggio annullato.")
 
 
-                                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                                                st.rerun()
 
 
                                 elif status_value == "cancelled":
@@ -5317,7 +5356,7 @@ if "messaggi" in tab_map:
                                             st.success("Messaggio ripristinato.")
 
 
-                                            # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                                            st.rerun()
 
 
                                 elif status_value == "sent":
@@ -5362,7 +5401,7 @@ if "messaggi" in tab_map:
                                             st.info("Messaggio annullato.")
 
 
-                                            # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                                            st.rerun()
 
 if "pulizie_servizi" in tab_map:
     with tab_map["pulizie_servizi"]:
@@ -5554,7 +5593,7 @@ if "pulizie_servizi" in tab_map:
                         st.error("Il servizio pulizia non risulta rileggibile dal database dopo il salvataggio.")
                     else:
                         st.success(f"Servizio pulizia salvato correttamente (ID {new_cleaning_id}).")
-                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                        st.rerun()
                 except Exception as exc:
                     st.error(f"Errore salvataggio servizio pulizia: {exc}")
 
@@ -5589,7 +5628,7 @@ if "pulizie_servizi" in tab_map:
                     if st.button("Azzera tutto il registro pulizie", use_container_width=True, key="delete_all_cleaning_services_button"):
                         deleted_rows = delete_all_cleaning_services(st.session_state.utente["id"])
                         st.success(f"Registro pulizie azzerato. Record eliminati: {deleted_rows}")
-                        # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                        st.rerun()
 
                 selected_cleaning_row = cleaning_df[cleaning_df["id"] == int(selected_cleaning_id)].iloc[0]
 
@@ -5730,13 +5769,13 @@ if "pulizie_servizi" in tab_map:
                             )
                             if updated:
                                 st.success("Servizio pulizia aggiornato.")
-                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                                st.rerun()
                     with edit_action2:
                         if st.button("Elimina servizio selezionato", use_container_width=True, key=f"delete_cleaning_service_button_{int(selected_cleaning_id)}"):
                             deleted = delete_cleaning_service(st.session_state.utente["id"], int(selected_cleaning_id))
                             if deleted:
                                 st.success("Servizio pulizia eliminato.")
-                                # st.rerun() rimosso: il click del widget fa già un rerun automatico
+                                st.rerun()
 
             
 
