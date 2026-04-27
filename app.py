@@ -537,50 +537,105 @@ def calculate_cleaning_total(hours_worked, hourly_rate, extra_cost=0.0, custom_t
 def save_cleaning_service(utente_id, data):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO cleaning_services (
-            utente_id, service_date, booking_ref, guest_name, service_type, cleaner_name,
-            start_time, end_time, hours_worked, hourly_rate, extra_cost,
-            custom_total_override, total_cost, payment_status, notes, updated_at
+    try:
+        cur.execute(
+            """
+            INSERT INTO cleaning_services (
+                utente_id, service_date, booking_ref, guest_name, service_type, cleaner_name,
+                start_time, end_time, hours_worked, hourly_rate, extra_cost,
+                custom_total_override, total_cost, payment_status, notes, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                int(utente_id),
+                str(data.get("service_date", "")),
+                str(data.get("booking_ref", "") or ""),
+                str(data.get("guest_name", "") or ""),
+                str(data.get("service_type", "check_out") or "check_out"),
+                str(data.get("cleaner_name", "") or ""),
+                str(data.get("start_time", "") or ""),
+                str(data.get("end_time", "") or ""),
+                float(data.get("hours_worked", 0) or 0),
+                float(data.get("hourly_rate", 0) or 0),
+                float(data.get("extra_cost", 0) or 0),
+                (None if data.get("custom_total_override", None) in [None, ""] else float(data.get("custom_total_override"))),
+                float(data.get("total_cost", 0) or 0),
+                str(data.get("payment_status", "Da pagare") or "Da pagare"),
+                str(data.get("notes", "") or ""),
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """,
-        (
-            int(utente_id),
-            str(data.get("service_date", "")),
-            str(data.get("booking_ref", "") or ""),
-            str(data.get("guest_name", "") or ""),
-            str(data.get("service_type", "check_out") or "check_out"),
-            str(data.get("cleaner_name", "") or ""),
-            str(data.get("start_time", "") or ""),
-            str(data.get("end_time", "") or ""),
-            float(data.get("hours_worked", 0) or 0),
-            float(data.get("hourly_rate", 0) or 0),
-            float(data.get("extra_cost", 0) or 0),
-            (None if data.get("custom_total_override", None) in [None, ""] else float(data.get("custom_total_override"))),
-            float(data.get("total_cost", 0) or 0),
-            str(data.get("payment_status", "Da pagare") or "Da pagare"),
-            str(data.get("notes", "") or ""),
-        ),
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def load_cleaning_services(utente_id):
-    conn = get_conn()
-    query = """
-        SELECT id, service_date, booking_ref, guest_name, service_type, cleaner_name,
-               start_time, end_time, hours_worked, hourly_rate, extra_cost,
-               custom_total_override, total_cost, payment_status, notes, created_at
-        FROM cleaning_services
-        WHERE utente_id = ?
-        ORDER BY date(service_date) DESC, id DESC
+    """Carica i servizi pulizie dal database in modo compatibile con Render/Postgres.
+
+    Non usa pd.read_sql_query perché con psycopg2/Postgres e placeholder SQLite-style
+    può produrre letture sporche o incoerenti. Gli ID vengono normalizzati e le righe
+    non valide vengono scartate per evitare crash e false mancate visualizzazioni.
     """
-    df = pd.read_sql_query(query, conn, params=(int(utente_id),))
-    conn.close()
-    return df
+    columns = [
+        "id", "service_date", "booking_ref", "guest_name", "service_type", "cleaner_name",
+        "start_time", "end_time", "hours_worked", "hourly_rate", "extra_cost",
+        "custom_total_override", "total_cost", "payment_status", "notes", "created_at",
+    ]
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, service_date, booking_ref, guest_name, service_type, cleaner_name,
+                   start_time, end_time, hours_worked, hourly_rate, extra_cost,
+                   custom_total_override, total_cost, payment_status, notes, created_at
+            FROM cleaning_services
+            WHERE utente_id = ?
+            ORDER BY service_date DESC, id DESC
+            """,
+            (int(utente_id),),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame([dict(row) for row in rows])
+    for col in columns:
+        if col not in df.columns:
+            df[col] = None
+
+    df["id"] = pd.to_numeric(df["id"], errors="coerce")
+    df = df[df["id"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df["id"] = df["id"].astype(int)
+    df["service_date"] = df["service_date"].fillna("").astype(str)
+    df["booking_ref"] = df["booking_ref"].fillna("").astype(str)
+    df["guest_name"] = df["guest_name"].fillna("").astype(str)
+    df["service_type"] = df["service_type"].fillna("check_out").astype(str)
+    df["cleaner_name"] = df["cleaner_name"].fillna("").astype(str)
+    df["start_time"] = df["start_time"].fillna("").astype(str)
+    df["end_time"] = df["end_time"].fillna("").astype(str)
+    df["payment_status"] = df["payment_status"].fillna("Da pagare").astype(str)
+    df["notes"] = df["notes"].fillna("").astype(str)
+
+    for col in ["hours_worked", "hourly_rate", "extra_cost", "custom_total_override", "total_cost"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    for col in ["hours_worked", "hourly_rate", "extra_cost", "total_cost"]:
+        df[col] = df[col].fillna(0.0)
+
+    return df[columns]
 
 
 def update_cleaning_payment_status(utente_id, service_id, payment_status):
