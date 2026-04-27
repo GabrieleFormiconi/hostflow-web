@@ -34,90 +34,8 @@ except Exception:
 from pricing_service import run_pricing_analysis
 
 
-def normalize_whatsapp_phone(phone_number):
-    """Normalizza un numero in formato E.164 per WhatsApp Cloud API."""
-    raw = str(phone_number or "").strip()
-    if not raw:
-        return ""
-
-    cleaned = re.sub(r"[^0-9+]", "", raw)
-    if cleaned.startswith("00"):
-        cleaned = "+" + cleaned[2:]
-    if cleaned.startswith("+"):
-        return cleaned
-
-    digits = re.sub(r"\D", "", cleaned)
-    # Default Italia: mobile senza prefisso internazionale, es. 3921234567
-    if len(digits) == 10 and digits.startswith("3"):
-        return "+39" + digits
-    if digits.startswith("39"):
-        return "+" + digits
-    return "+" + digits if digits else ""
-
-
-def whatsapp_cloud_config():
-    return {
-        "access_token": str(get_secret_value("WHATSAPP_ACCESS_TOKEN", "") or "").strip(),
-        "phone_number_id": str(get_secret_value("WHATSAPP_PHONE_NUMBER_ID", "") or "").strip(),
-        "api_version": str(get_secret_value("WHATSAPP_API_VERSION", "v23.0") or "v23.0").strip(),
-    }
-
-
-def whatsapp_cloud_configured():
-    cfg = whatsapp_cloud_config()
-    return bool(cfg["access_token"] and cfg["phone_number_id"])
-
-
 def send_whatsapp_message(phone_number, message_text):
-    """Invia un messaggio testuale tramite WhatsApp Cloud API.
-
-    Richiede su Render:
-    - WHATSAPP_ACCESS_TOKEN
-    - WHATSAPP_PHONE_NUMBER_ID
-    - opzionale WHATSAPP_API_VERSION, default v23.0
-    """
-    cfg = whatsapp_cloud_config()
-    if not cfg["access_token"] or not cfg["phone_number_id"]:
-        return False, "Config WhatsApp Cloud API mancante: imposta WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID su Render."
-
-    phone = normalize_whatsapp_phone(phone_number)
-    if not phone:
-        return False, "Numero ospite mancante o non valido."
-
-    text = str(message_text or "").strip()
-    if not text:
-        return False, "Testo messaggio vuoto."
-
-    url = f"https://graph.facebook.com/{cfg['api_version']}/{cfg['phone_number_id']}/messages"
-    headers = {
-        "Authorization": f"Bearer {cfg['access_token']}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": phone,
-        "type": "text",
-        "text": {"preview_url": False, "body": text},
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=25)
-        try:
-            data = response.json()
-        except Exception:
-            data = {"raw_response": response.text}
-
-        if 200 <= response.status_code < 300:
-            message_id = ""
-            try:
-                message_id = data.get("messages", [{}])[0].get("id", "")
-            except Exception:
-                message_id = ""
-            return True, message_id or data
-
-        return False, data
-    except Exception as exc:
-        return False, str(exc)
+    return False, "WhatsApp Web disattivato: integrazione Cloud API in preparazione"
 
 
 # ---------------------------
@@ -1057,23 +975,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             sent_at TEXT,
             error_message TEXT,
-            FOREIGN KEY (utente_id) REFERENCES utenti(id)
-        )
-    """)
-
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS whatsapp_chat_messages (
-            id {id_pk},
-            utente_id INTEGER NOT NULL,
-            booking_ref TEXT,
-            guest_name TEXT,
-            guest_phone TEXT,
-            direction TEXT NOT NULL DEFAULT 'out',
-            message_type TEXT,
-            message_text TEXT NOT NULL,
-            provider_message_id TEXT,
-            status TEXT DEFAULT 'sent',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (utente_id) REFERENCES utenti(id)
         )
     """)
@@ -3421,88 +3322,6 @@ def load_scheduled_messages(utente_id):
     return df
 
 
-
-
-def save_whatsapp_chat_message(utente_id, booking_ref, guest_name, guest_phone, direction, message_text, message_type="", provider_message_id="", status="sent"):
-    """Salva un messaggio nella inbox WhatsApp interna HostFlow."""
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            INSERT INTO whatsapp_chat_messages (
-                utente_id, booking_ref, guest_name, guest_phone, direction,
-                message_type, message_text, provider_message_id, status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """,
-            (
-                int(utente_id),
-                str(booking_ref or ""),
-                str(guest_name or ""),
-                normalize_whatsapp_phone(guest_phone),
-                str(direction or "out"),
-                str(message_type or ""),
-                str(message_text or ""),
-                str(provider_message_id or ""),
-                str(status or "sent"),
-            ),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def load_whatsapp_chat_messages(utente_id):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, booking_ref, guest_name, guest_phone, direction, message_type,
-                   message_text, provider_message_id, status, created_at
-            FROM whatsapp_chat_messages
-            WHERE utente_id = ?
-            ORDER BY created_at ASC, id ASC
-            """,
-            (int(utente_id),),
-        )
-        rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    columns = [
-        "id", "booking_ref", "guest_name", "guest_phone", "direction", "message_type",
-        "message_text", "provider_message_id", "status", "created_at"
-    ]
-    if not rows:
-        return pd.DataFrame(columns=columns)
-    df_chat = pd.DataFrame([dict(row) for row in rows])
-    for col in columns:
-        if col not in df_chat.columns:
-            df_chat[col] = ""
-    df_chat["id"] = pd.to_numeric(df_chat["id"], errors="coerce").fillna(0).astype(int)
-    df_chat["created_at_dt"] = pd.to_datetime(df_chat["created_at"], errors="coerce")
-    return df_chat
-
-
-def load_whatsapp_conversations(utente_id):
-    chat_df = load_whatsapp_chat_messages(utente_id)
-    if chat_df.empty:
-        return chat_df
-
-    conv = chat_df.copy()
-    conv["conversation_key"] = (
-        conv["guest_phone"].fillna("").astype(str).str.strip() + "||" +
-        conv["booking_ref"].fillna("").astype(str).str.strip()
-    )
-    conv = conv.sort_values(["created_at_dt", "id"]).groupby("conversation_key", as_index=False).tail(1)
-    conv = conv.sort_values(["created_at_dt", "id"], ascending=[False, False]).reset_index(drop=True)
-    return conv
-
 def get_scheduled_message_by_id(message_id, utente_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -5425,202 +5244,164 @@ if "messaggi" in tab_map:
 
                                 status_value = str(current_msg.get("status", "pending"))
 
-                                def _send_selected_message_now():
-                                    phone_to_send = resolved_guest_phone or str(current_msg.get("guest_phone", "") or "").strip()
-                                    message_text_to_send = str(current_msg.get("message_text", "") or "").strip()
-
-                                    if not phone_to_send:
-                                        st.error("Numero ospite mancante: aggiungilo alla prenotazione prima di inviare WhatsApp.")
-                                        return
-
-                                    success, result = send_whatsapp_message(phone_to_send, message_text_to_send)
-
-                                    if success:
-                                        update_scheduled_message_status(
-                                            selected_id,
-                                            st.session_state.utente["id"],
-                                            "sent",
-                                            error_message=None,
-                                            set_sent_now=True,
-                                        )
-                                        save_whatsapp_chat_message(
-                                            st.session_state.utente["id"],
-                                            current_msg.get("booking_ref", ""),
-                                            current_msg.get("guest_name", ""),
-                                            phone_to_send,
-                                            "out",
-                                            message_text_to_send,
-                                            message_type=current_msg.get("message_type", ""),
-                                            provider_message_id=str(result),
-                                            status="sent",
-                                        )
-                                        st.success("Messaggio WhatsApp inviato e salvato nella Inbox.")
-                                        st.rerun()
-                                    else:
-                                        update_scheduled_message_status(
-                                            selected_id,
-                                            st.session_state.utente["id"],
-                                            "failed",
-                                            error_message=str(result),
-                                            set_sent_now=False,
-                                        )
-                                        st.error(f"Errore invio WhatsApp: {result}")
-                                        st.rerun()
 
                                 if status_value == "failed":
-                                    action1, action2, action3 = st.columns(3)
-                                    with action1:
-                                        if st.button("Invia WhatsApp ora", use_container_width=True, key=f"send_now_failed_{selected_id}"):
-                                            _send_selected_message_now()
-                                    with action2:
-                                        if st.button("Ripristina", use_container_width=True, key=f"retry_msg_{selected_id}"):
-                                            ok = update_scheduled_message_status(
-                                                selected_id,
-                                                st.session_state.utente["id"],
-                                                "pending",
-                                                error_message=None,
-                                                set_sent_now=False,
-                                            )
-                                            if ok:
-                                                st.success("Messaggio rimesso in attesa di invio.")
-                                                st.rerun()
-                                    with action3:
-                                        if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
-                                            ok = update_scheduled_message_status(
-                                                selected_id,
-                                                st.session_state.utente["id"],
-                                                "cancelled",
-                                                error_message=None,
-                                                set_sent_now=False,
-                                            )
-                                            if ok:
-                                                st.info("Messaggio annullato.")
-                                                st.rerun()
 
-                                elif status_value == "cancelled":
-                                    if st.button("Ripristina", use_container_width=True, key=f"restore_msg_{selected_id}"):
-                                        ok = update_scheduled_message_status(
-                                            selected_id,
-                                            st.session_state.utente["id"],
-                                            "pending",
-                                            error_message=None,
-                                            set_sent_now=False,
-                                        )
-                                        if ok:
-                                            st.success("Messaggio ripristinato.")
-                                            st.rerun()
-
-                                elif status_value == "sent":
-                                    st.success("Questo messaggio risulta già inviato ed è visibile anche nella Inbox WhatsApp.")
-
-                                else:
-                                    if whatsapp_cloud_configured():
-                                        st.info("WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.")
-                                    else:
-                                        st.warning("WhatsApp Cloud API non configurata: imposta WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID su Render.")
 
                                     action1, action2 = st.columns(2)
+
+
                                     with action1:
-                                        if st.button("Invia WhatsApp ora", use_container_width=True, key=f"send_now_{selected_id}"):
-                                            _send_selected_message_now()
-                                    with action2:
-                                        if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
+
+
+                                        if st.button("Ripristina", use_container_width=True, key=f"retry_msg_{selected_id}"):
+
+
                                             ok = update_scheduled_message_status(
+
+
                                                 selected_id,
+
+
                                                 st.session_state.utente["id"],
-                                                "cancelled",
+
+
+                                                "pending",
+
+
                                                 error_message=None,
+
+
                                                 set_sent_now=False,
+
+
                                             )
+
+
                                             if ok:
-                                                st.info("Messaggio annullato.")
+
+
+                                                st.success("Messaggio rimesso in attesa di invio.")
+
+
                                                 st.rerun()
 
-            st.markdown("### Inbox WhatsApp")
-            if whatsapp_cloud_configured():
-                st.success("Cloud API configurata. I messaggi inviati da HostFlow vengono salvati qui per guest/conversazione.")
-            else:
-                st.warning("Cloud API non ancora configurata. Su Render serviranno WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID per inviare messaggi reali.")
 
-            chat_df = load_whatsapp_chat_messages(st.session_state.utente["id"])
-            if chat_df.empty:
-                st.info("Nessuna conversazione WhatsApp ancora. Invia un messaggio programmato per iniziare il feed chat.")
-            else:
-                conversations_df = load_whatsapp_conversations(st.session_state.utente["id"])
-                conv_options = []
-                conv_map = {}
-                for _, conv_row in conversations_df.iterrows():
-                    guest_label = str(conv_row.get("guest_name", "") or "Ospite").strip() or "Ospite"
-                    phone_label = str(conv_row.get("guest_phone", "") or "").strip()
-                    created_label = ""
-                    try:
-                        created_label = pd.to_datetime(conv_row.get("created_at")).strftime("%d/%m/%Y %H:%M")
-                    except Exception:
-                        created_label = str(conv_row.get("created_at", ""))
-                    key_value = f'{phone_label}||{str(conv_row.get("booking_ref", "") or "")}'
-                    label = f"{guest_label} · {phone_label or 'senza numero'} · ultimo: {created_label}"
-                    conv_options.append(label)
-                    conv_map[label] = key_value
+                                    with action2:
 
-                selected_conv_label = st.selectbox("Conversazioni", conv_options, key="whatsapp_inbox_selected_conversation")
-                selected_conv_key = conv_map.get(selected_conv_label, "")
-                selected_phone, selected_booking_ref = (selected_conv_key.split("||", 1) + [""])[:2]
 
-                conversation_messages = chat_df[
-                    (chat_df["guest_phone"].fillna("").astype(str) == selected_phone)
-                    & (chat_df["booking_ref"].fillna("").astype(str) == selected_booking_ref)
-                ].copy()
-                conversation_messages = conversation_messages.sort_values(["created_at_dt", "id"])
+                                        if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
 
-                st.markdown("#### Feed conversazione")
-                for _, chat_row in conversation_messages.iterrows():
-                    direction = str(chat_row.get("direction", "out") or "out")
-                    author = "HostFlow" if direction == "out" else str(chat_row.get("guest_name", "Ospite") or "Ospite")
-                    try:
-                        when = pd.to_datetime(chat_row.get("created_at")).strftime("%d/%m/%Y %H:%M")
-                    except Exception:
-                        when = str(chat_row.get("created_at", ""))
-                    align = "right" if direction == "out" else "left"
-                    bg = "rgba(31,79,255,0.16)" if direction == "out" else "rgba(255,255,255,0.06)"
-                    st.markdown(
-                        f"""
-                        <div style="text-align:{align}; margin: 8px 0;">
-                            <div style="display:inline-block; max-width:78%; text-align:left; padding:12px 14px; border-radius:14px; background:{bg}; border:1px solid {COLORI['colore_bordo']};">
-                                <div style="font-size:0.78rem; opacity:0.72; margin-bottom:4px;">{author} · {when}</div>
-                                <div style="white-space:pre-wrap;">{str(chat_row.get('message_text', '') or '')}</div>
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
 
-                with st.form("manual_whatsapp_reply_form", clear_on_submit=True):
-                    reply_text = st.text_area("Rispondi dal numero business", height=110, key="manual_whatsapp_reply_text")
-                    send_reply = st.form_submit_button("Invia risposta WhatsApp", use_container_width=True)
-                    if send_reply:
-                        if not selected_phone:
-                            st.error("Numero conversazione mancante.")
-                        elif not str(reply_text or "").strip():
-                            st.error("Scrivi una risposta prima di inviare.")
-                        else:
-                            success, result = send_whatsapp_message(selected_phone, reply_text)
-                            if success:
-                                last_row = conversation_messages.iloc[-1]
-                                save_whatsapp_chat_message(
-                                    st.session_state.utente["id"],
-                                    selected_booking_ref,
-                                    str(last_row.get("guest_name", "") or ""),
-                                    selected_phone,
-                                    "out",
-                                    reply_text,
-                                    message_type="manual_reply",
-                                    provider_message_id=str(result),
-                                    status="sent",
-                                )
-                                st.success("Risposta inviata e salvata nella Inbox.")
-                                st.rerun()
-                            else:
-                                st.error(f"Errore invio risposta WhatsApp: {result}")
+                                            ok = update_scheduled_message_status(
+
+
+                                                selected_id,
+
+
+                                                st.session_state.utente["id"],
+
+
+                                                "cancelled",
+
+
+                                                error_message=None,
+
+
+                                                set_sent_now=False,
+
+
+                                            )
+
+
+                                            if ok:
+
+
+                                                st.info("Messaggio annullato.")
+
+
+                                                st.rerun()
+
+
+                                elif status_value == "cancelled":
+
+
+                                    if st.button("Ripristina", use_container_width=True, key=f"restore_msg_{selected_id}"):
+
+
+                                        ok = update_scheduled_message_status(
+
+
+                                            selected_id,
+
+
+                                            st.session_state.utente["id"],
+
+
+                                            "pending",
+
+
+                                            error_message=None,
+
+
+                                            set_sent_now=False,
+
+
+                                        )
+
+
+                                        if ok:
+
+
+                                            st.success("Messaggio ripristinato.")
+
+
+                                            st.rerun()
+
+
+                                elif status_value == "sent":
+
+
+                                    st.success("Questo messaggio risulta già inviato. Se vuoi rivedere quelli vecchi puoi lasciare attivo 'Mostra storico'.")
+
+
+                                else:
+
+
+                                    st.info("L'invio automatico verrà gestito dal provider WhatsApp integrato online. Da qui puoi solo monitorare o annullare il messaggio.")
+
+
+                                    if st.button("Annulla", use_container_width=True, key=f"cancel_msg_{selected_id}"):
+
+
+                                        ok = update_scheduled_message_status(
+
+
+                                            selected_id,
+
+
+                                            st.session_state.utente["id"],
+
+
+                                            "cancelled",
+
+
+                                            error_message=None,
+
+
+                                            set_sent_now=False,
+
+
+                                        )
+
+
+                                        if ok:
+
+
+                                            st.info("Messaggio annullato.")
+
+
+                                            st.rerun()
 
 if "pulizie_servizi" in tab_map:
     with tab_map["pulizie_servizi"]:
