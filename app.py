@@ -591,7 +591,8 @@ def save_cleaning_service(utente_id, data):
                     str(data.get("notes", "") or ""),
                 ),
             )
-            inserted = fetchone_dict(cur)
+            inserted = cur.fetchone()
+            inserted = dict(inserted) if inserted else None
             new_id = inserted.get("id") if inserted else None
         else:
             cur.execute(
