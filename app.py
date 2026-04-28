@@ -3423,6 +3423,33 @@ def load_scheduled_messages(utente_id):
 
 
 
+
+def ensure_whatsapp_chat_messages_table():
+    """Crea la tabella Inbox WhatsApp se il DB era già esistente prima della feature."""
+    conn = get_conn()
+    cur = conn.cursor()
+    id_pk = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    try:
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS whatsapp_chat_messages (
+                id {id_pk},
+                utente_id INTEGER NOT NULL,
+                booking_ref TEXT,
+                guest_name TEXT,
+                guest_phone TEXT,
+                direction TEXT NOT NULL DEFAULT 'out',
+                message_type TEXT,
+                message_text TEXT NOT NULL,
+                provider_message_id TEXT,
+                status TEXT DEFAULT 'sent',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (utente_id) REFERENCES utenti(id)
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
 def save_whatsapp_chat_message(utente_id, booking_ref, guest_name, guest_phone, direction, message_text, message_type="", provider_message_id="", status="sent"):
     """Salva un messaggio nella inbox WhatsApp interna HostFlow."""
     conn = get_conn()
@@ -3457,6 +3484,7 @@ def save_whatsapp_chat_message(utente_id, booking_ref, guest_name, guest_phone, 
 
 
 def load_whatsapp_chat_messages(utente_id):
+    ensure_whatsapp_chat_messages_table()
     conn = get_conn()
     cur = conn.cursor()
     try:
