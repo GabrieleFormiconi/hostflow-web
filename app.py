@@ -3400,101 +3400,26 @@ def replace_scheduled_messages_for_user(utente_id, bookings_df, profilo, schedul
 
 
 def load_scheduled_messages(utente_id):
-    conn = get_conn()
-    query = """
-        SELECT id, booking_ref, platform, guest_name, guest_phone, check_in, check_out, message_type, send_at,
-               channel, status, message_text, created_at, sent_at, error_message
-        FROM scheduled_messages
-        WHERE utente_id = ?
-        ORDER BY send_at ASC, id ASC
+    """Carica i messaggi programmati dal DB in modo robusto anche su Postgres/Render.
+
+    Non usa pd.read_sql_query con placeholder "?" perché con psycopg2 può leggere in modo
+    incoerente rispetto al cursore custom che traduce i placeholder in "%s".
     """
-    df = pd.read_sql_query(query, conn, params=(utente_id,))
-    conn.close()
+    columns = [
+        "id", "booking_ref", "platform", "guest_name", "guest_phone", "check_in", "check_out",
+        "message_type", "send_at", "channel", "status", "message_text", "created_at", "sent_at", "error_message"
+    ]
 
-    if not df.empty:
-        df = df.copy()
-        check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
-        check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
-        send_at_dt = pd.to_datetime(df.get("send_at"), errors="coerce")
-        clean_mask = check_in_dt.notna() & check_out_dt.notna() & send_at_dt.notna()
-        df = df[clean_mask].copy()
-    return df
-
-
-
-
-
-def ensure_whatsapp_chat_messages_table():
-    """Crea la tabella Inbox WhatsApp se il DB era già esistente prima della feature."""
-    conn = get_conn()
-    cur = conn.cursor()
-    id_pk = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    try:
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS whatsapp_chat_messages (
-                id {id_pk},
-                utente_id INTEGER NOT NULL,
-                booking_ref TEXT,
-                guest_name TEXT,
-                guest_phone TEXT,
-                direction TEXT NOT NULL DEFAULT 'out',
-                message_type TEXT,
-                message_text TEXT NOT NULL,
-                provider_message_id TEXT,
-                status TEXT DEFAULT 'sent',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (utente_id) REFERENCES utenti(id)
-            )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
-
-def save_whatsapp_chat_message(utente_id, booking_ref, guest_name, guest_phone, direction, message_text, message_type="", provider_message_id="", status="sent"):
-    """Salva un messaggio nella inbox WhatsApp interna HostFlow."""
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            INSERT INTO whatsapp_chat_messages (
-                utente_id, booking_ref, guest_name, guest_phone, direction,
-                message_type, message_text, provider_message_id, status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """,
-            (
-                int(utente_id),
-                str(booking_ref or ""),
-                str(guest_name or ""),
-                normalize_whatsapp_phone(guest_phone),
-                str(direction or "out"),
-                str(message_type or ""),
-                str(message_text or ""),
-                str(provider_message_id or ""),
-                str(status or "sent"),
-            ),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def load_whatsapp_chat_messages(utente_id):
-    ensure_whatsapp_chat_messages_table()
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, booking_ref, guest_name, guest_phone, direction, message_type,
-                   message_text, provider_message_id, status, created_at
-            FROM whatsapp_chat_messages
+            SELECT id, booking_ref, platform, guest_name, guest_phone, check_in, check_out, message_type, send_at,
+                   channel, status, message_text, created_at, sent_at, error_message
+            FROM scheduled_messages
             WHERE utente_id = ?
-            ORDER BY created_at ASC, id ASC
+            ORDER BY send_at ASC, id ASC
             """,
             (int(utente_id),),
         )
@@ -3502,34 +3427,28 @@ def load_whatsapp_chat_messages(utente_id):
     finally:
         conn.close()
 
-    columns = [
-        "id", "booking_ref", "guest_name", "guest_phone", "direction", "message_type",
-        "message_text", "provider_message_id", "status", "created_at"
-    ]
     if not rows:
         return pd.DataFrame(columns=columns)
-    df_chat = pd.DataFrame([dict(row) for row in rows])
+
+    df = pd.DataFrame([dict(row) for row in rows])
     for col in columns:
-        if col not in df_chat.columns:
-            df_chat[col] = ""
-    df_chat["id"] = pd.to_numeric(df_chat["id"], errors="coerce").fillna(0).astype(int)
-    df_chat["created_at_dt"] = pd.to_datetime(df_chat["created_at"], errors="coerce")
-    return df_chat
+        if col not in df.columns:
+            df[col] = ""
 
+    df["id"] = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int)
+    for text_col in ["booking_ref", "platform", "guest_name", "guest_phone", "message_type", "channel", "status", "message_text", "error_message"]:
+        df[text_col] = df[text_col].fillna("").astype(str)
 
-def load_whatsapp_conversations(utente_id):
-    chat_df = load_whatsapp_chat_messages(utente_id)
-    if chat_df.empty:
-        return chat_df
+    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
+    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
+    send_at_dt = pd.to_datetime(df.get("send_at"), errors="coerce")
+    clean_mask = check_in_dt.notna() & check_out_dt.notna() & send_at_dt.notna()
+    df = df[clean_mask].copy()
 
-    conv = chat_df.copy()
-    conv["conversation_key"] = (
-        conv["guest_phone"].fillna("").astype(str).str.strip() + "||" +
-        conv["booking_ref"].fillna("").astype(str).str.strip()
-    )
-    conv = conv.sort_values(["created_at_dt", "id"]).groupby("conversation_key", as_index=False).tail(1)
-    conv = conv.sort_values(["created_at_dt", "id"], ascending=[False, False]).reset_index(drop=True)
-    return conv
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    return df[columns].reset_index(drop=True)
 
 def get_scheduled_message_by_id(message_id, utente_id):
     conn = get_conn()
