@@ -3450,6 +3450,115 @@ def load_scheduled_messages(utente_id):
 
     return df[columns].reset_index(drop=True)
 
+
+def ensure_whatsapp_chat_messages_table():
+    """Crea la tabella Inbox WhatsApp se il DB era già esistente prima della feature."""
+    conn = get_conn()
+    cur = conn.cursor()
+    id_pk = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    try:
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS whatsapp_chat_messages (
+                id {id_pk},
+                utente_id INTEGER NOT NULL,
+                booking_ref TEXT,
+                guest_name TEXT,
+                guest_phone TEXT,
+                direction TEXT NOT NULL DEFAULT 'out',
+                message_type TEXT,
+                message_text TEXT NOT NULL,
+                provider_message_id TEXT,
+                status TEXT DEFAULT 'sent',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (utente_id) REFERENCES utenti(id)
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_whatsapp_chat_message(utente_id, booking_ref, guest_name, guest_phone, direction, message_text, message_type="", provider_message_id="", status="sent"):
+    """Salva un messaggio nella inbox WhatsApp interna HostFlow."""
+    ensure_whatsapp_chat_messages_table()
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO whatsapp_chat_messages (
+                utente_id, booking_ref, guest_name, guest_phone, direction,
+                message_type, message_text, provider_message_id, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                int(utente_id),
+                str(booking_ref or ""),
+                str(guest_name or ""),
+                normalize_whatsapp_phone(guest_phone),
+                str(direction or "out"),
+                str(message_type or ""),
+                str(message_text or ""),
+                str(provider_message_id or ""),
+                str(status or "sent"),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def load_whatsapp_chat_messages(utente_id):
+    ensure_whatsapp_chat_messages_table()
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, booking_ref, guest_name, guest_phone, direction, message_type,
+                   message_text, provider_message_id, status, created_at
+            FROM whatsapp_chat_messages
+            WHERE utente_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (int(utente_id),),
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    columns = [
+        "id", "booking_ref", "guest_name", "guest_phone", "direction", "message_type",
+        "message_text", "provider_message_id", "status", "created_at"
+    ]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    df_chat = pd.DataFrame([dict(row) for row in rows])
+    for col in columns:
+        if col not in df_chat.columns:
+            df_chat[col] = ""
+    df_chat["id"] = pd.to_numeric(df_chat["id"], errors="coerce").fillna(0).astype(int)
+    df_chat["created_at_dt"] = pd.to_datetime(df_chat["created_at"], errors="coerce")
+    return df_chat
+
+
+def load_whatsapp_conversations(utente_id):
+    chat_df = load_whatsapp_chat_messages(utente_id)
+    if chat_df.empty:
+        return chat_df
+
+    conv = chat_df.copy()
+    conv["conversation_key"] = (
+        conv["guest_phone"].fillna("").astype(str).str.strip() + "||" +
+        conv["booking_ref"].fillna("").astype(str).str.strip()
+    )
+    conv = conv.sort_values(["created_at_dt", "id"]).groupby("conversation_key", as_index=False).tail(1)
+    conv = conv.sort_values(["created_at_dt", "id"], ascending=[False, False]).reset_index(drop=True)
+    return conv
 def get_scheduled_message_by_id(message_id, utente_id):
     conn = get_conn()
     cur = conn.cursor()
