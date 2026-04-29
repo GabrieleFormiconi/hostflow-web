@@ -314,24 +314,36 @@ function ImmobileTab({ property, setProperty, onboarding, setOnboarding }) {
 }
 function MarketTab({ property }) { return <><h2>Analisi mercato</h2><div className="hf-form-box"><div className="hf-grid-2"><label>Check-in analisi<input type="date" /></label><label>Check-out analisi<input type="date" /></label><label>Raggio analisi (km)<input value={property.raggio_competitor} readOnly /></label><label>Ospiti analisi<input value={property.ospiti_massimi} readOnly /></label></div><label>Tipologia da confrontare<select value={property.tipologia_immobile} readOnly><option>Appartamento intero</option><option>Stanza privata</option><option>Casa vacanze</option></select></label><h2>Analisi mercato e pricing</h2><label>Indirizzo immobile<input value={property.indirizzo_completo} readOnly placeholder="Compila prima la scheda immobile" /></label><button type="button" className="hf-primary-full">Analizza mercato e pricing</button></div><div className="hf-metrics"><Metric label="Indirizzo" value={property.indirizzo_completo || "-"} /><Metric label="Città" value={property.citta || "-"} /><Metric label="Competitor trovati" value="0" /><Metric label="Prezzo suggerito" value="€ 0,00" /></div><h2>Competitor trovati</h2><div className="hf-info">Nessun competitor trovato nel raggio selezionato.</div></>; }
 function PricingTab({ rows, settings }) { const active = rows.filter(r => !isCancelled(r)); const revenue = active.reduce((s, r) => s + toNum(r.total_price), 0); const n = active.reduce((s, r) => s + toNum(r.nights), 0); const adr = n ? revenue / n : 0; return <><h2>Pricing engine</h2><div className="hf-form-box"><h3>Base price</h3><label>Fonte base price<select><option>ADR periodo dashboard</option><option>Manuale</option></select></label><label>Prezzo manuale notte (€)<input defaultValue="100" /></label><label>Data da prezzare<input type="date" /></label><label className="hf-check"><input type="checkbox" />C'è un evento/ponte/fiera?</label><h3>Regole pricing</h3><div className="hf-grid-2">{["Weekend markup (%)", "Evento markup (%)", "Last minute sconto (%)", "Last minute entro giorni", "Early booking markup (%)", "Early booking oltre giorni", "Occupazione alta da (%)", "Markup occupazione alta (%)", "Occupazione bassa fino a (%)", "Sconto occupazione bassa (%)"].map(l => <label key={l}>{l}<input defaultValue="0" /></label>)}</div></div><h2>Risultato pricing</h2><div className="hf-metrics"><Metric label="Prezzo base usato" value={euro(adr)} /><Metric label="Fonte base price" value={settings.periodMode} /><Metric label="Prezzo suggerito" value={euro(adr)} /></div></>; }
-function MessagesTab({ property, rows }) {
+function MessagesTab({ token, property, rows }) {
   const [showTemplates, setShowTemplates] = useState(false);
   const [templates, setTemplates] = useState(DEFAULT_TEMPLATES);
   const [schedules, setSchedules] = useState(DEFAULT_SCHEDULES);
   const [msg, setMsg] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [cancelledIds, setCancelledIds] = useState([]);
+  const [sending, setSending] = useState(false);
+  const [actionMsg, setActionMsg] = useState("");
+  const [statusOverrides, setStatusOverrides] = useState({});
+  const [syncingSchedule, setSyncingSchedule] = useState(false);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [selectedChatPhone, setSelectedChatPhone] = useState("");
 
   useEffect(() => {
     setTemplates(readJson(STORAGE.templates, DEFAULT_TEMPLATES));
     setSchedules(readJson(STORAGE.schedules, DEFAULT_SCHEDULES));
     try { setCancelledIds(JSON.parse(localStorage.getItem("hostflow_cancelled_message_ids_v1") || "[]")); } catch { setCancelledIds([]); }
+    try { setStatusOverrides(JSON.parse(localStorage.getItem("hostflow_message_status_overrides_v1") || "{}")); } catch { setStatusOverrides({}); }
   }, []);
+
+  useEffect(() => { if (token) loadChat(); }, [token]);
 
   function updateTemplate(key, value) { setTemplates(prev => ({ ...prev, [key]: value })); }
   function saveTemplates() { writeJson(STORAGE.templates, templates); writeJson(STORAGE.schedules, schedules); setMsg("Template messaggi e orari salvati."); }
   function formatItalianDate(dateStr) { if (!dateStr) return "-"; const d = new Date(dateStr); if (Number.isNaN(d.getTime())) return String(dateStr); return d.toLocaleDateString("it-IT"); }
   function typeBaseDate(type, row) { if (type === "checkout_reminder" || type === "review_request") return row.check_out; return row.check_in; }
+  function bookingRefFor(row) { return `${row.platform || "Booking"}|${row.guest_name || "Ospite"}|${fmtDate(row.check_in)}|${fmtDate(row.check_out)}`; }
+  function saveStatusOverrides(next) { setStatusOverrides(next); try { localStorage.setItem("hostflow_message_status_overrides_v1", JSON.stringify(next)); } catch {} }
   function renderTemplate(template, row) {
     const ctx = {
       nome_ospite: row.guest_name || "Ospite",
@@ -371,18 +383,134 @@ function MessagesTab({ property, rows }) {
         const sendTime = rule.time || "10:00";
         const id = `${row.platform || "row"}-${row.id || row.guest_name || row.check_in}-${type}`;
         const cancelled = cancelledIds.includes(id);
-        list.push({ id, row, type, label: rule.label || defaultRule.label, sendDate, sendTime, sendAt: `${sendDate} ${sendTime}`, status: cancelled ? "cancelled" : "pending", text: renderTemplate(templates[type], row) });
+        const override = statusOverrides[id] || {};
+        list.push({
+          id,
+          row,
+          type,
+          label: rule.label || defaultRule.label,
+          sendDate,
+          sendTime,
+          sendAt: `${sendDate} ${sendTime}`,
+          status: cancelled ? "cancelled" : override.status || "pending",
+          error_message: override.error_message || "",
+          whatsapp_message_id: override.whatsapp_message_id || "",
+          text: renderTemplate(templates[type], row),
+          booking_ref: bookingRefFor(row),
+        });
       });
     });
     return list.sort((a, b) => String(a.sendAt).localeCompare(String(b.sendAt)));
-  }, [rows, schedules, templates, property, cancelledIds]);
+  }, [rows, schedules, templates, property, cancelledIds, statusOverrides]);
   useEffect(() => { if (!scheduledMessages.length) { setSelectedId(""); return; } if (!selectedId || !scheduledMessages.some(m => m.id === selectedId)) setSelectedId(scheduledMessages[0].id); }, [scheduledMessages, selectedId]);
 
   const selected = scheduledMessages.find(m => m.id === selectedId) || scheduledMessages[0];
   const pendingCount = scheduledMessages.filter(m => m.status === "pending").length;
+  const sentCount = scheduledMessages.filter(m => m.status === "sent").length;
+  const failedCount = scheduledMessages.filter(m => m.status === "failed").length;
   const cancelledCount = scheduledMessages.filter(m => m.status === "cancelled").length;
-  function cancelSelected() { if (!selected) return; const next = Array.from(new Set([...cancelledIds, selected.id])); setCancelledIds(next); localStorage.setItem("hostflow_cancelled_message_ids_v1", JSON.stringify(next)); }
-  function restoreSelected() { if (!selected) return; const next = cancelledIds.filter(id => id !== selected.id); setCancelledIds(next); localStorage.setItem("hostflow_cancelled_message_ids_v1", JSON.stringify(next)); }
+
+  async function loadChat() {
+    if (!token) return;
+    setChatLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/messages/chat`, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || data.message || "Errore caricamento chat.");
+      const convs = Array.isArray(data.conversations) ? data.conversations : [];
+      setConversations(convs);
+      if (!selectedChatPhone && convs[0]?.guest_phone) setSelectedChatPhone(convs[0].guest_phone);
+    } catch (e) {
+      setActionMsg(e.message || "Errore caricamento chat.");
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
+  async function syncScheduledMessages() {
+    if (!token) return;
+    setSyncingSchedule(true);
+    setActionMsg("");
+    try {
+      const payload = {
+        messages: scheduledMessages
+          .filter(m => m.status === "pending")
+          .map(m => ({
+            guest_phone: m.row.guest_phone,
+            guest_name: m.row.guest_name,
+            booking_ref: m.booking_ref,
+            message_type: m.type,
+            message_text: m.text,
+            scheduled_message_id: m.id,
+            send_at: `${m.sendDate}T${m.sendTime}:00`,
+          })),
+      };
+      const res = await fetch(`${API_URL}/messages/scheduled/bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== "ok") throw new Error(data.error || data.message || "Errore salvataggio programmazione.");
+      setActionMsg(`${data.saved || 0} messaggi programmati sincronizzati con il backend.`);
+    } catch (e) {
+      setActionMsg(e.message || "Errore salvataggio programmazione.");
+    } finally {
+      setSyncingSchedule(false);
+    }
+  }
+
+  async function sendSelected() {
+    if (!selected || sending) return;
+    setSending(true);
+    setActionMsg("");
+    try {
+      const res = await fetch(`${API_URL}/messages/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          guest_phone: selected.row.guest_phone,
+          guest_name: selected.row.guest_name,
+          booking_ref: selected.booking_ref,
+          message_type: selected.type,
+          message_text: selected.text,
+          scheduled_message_id: selected.id,
+          send_at: `${selected.sendDate}T${selected.sendTime}:00`,
+        }),
+      });
+      const data = await res.json();
+      const status = data.message_status || (res.ok && data.status === "ok" ? "sent" : "failed");
+      const next = { ...statusOverrides, [selected.id]: { status, error_message: data.error_message || data.error || data.message || "", whatsapp_message_id: data.whatsapp_message_id || "" } };
+      saveStatusOverrides(next);
+      setActionMsg(status === "sent" ? "Messaggio WhatsApp inviato correttamente." : `Invio fallito: ${data.error || data.message || data.error_message || "controlla token/numero Meta."}`);
+      loadChat();
+    } catch (e) {
+      const next = { ...statusOverrides, [selected.id]: { status: "failed", error_message: e.message || "Errore invio WhatsApp." } };
+      saveStatusOverrides(next);
+      setActionMsg(e.message || "Errore invio WhatsApp.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function cancelSelected() {
+    if (!selected) return;
+    const nextCancelled = Array.from(new Set([...cancelledIds, selected.id]));
+    setCancelledIds(nextCancelled);
+    localStorage.setItem("hostflow_cancelled_message_ids_v1", JSON.stringify(nextCancelled));
+    const nextStatus = { ...statusOverrides, [selected.id]: { ...(statusOverrides[selected.id] || {}), status: "cancelled" } };
+    saveStatusOverrides(nextStatus);
+  }
+  function restoreSelected() {
+    if (!selected) return;
+    const nextCancelled = cancelledIds.filter(id => id !== selected.id);
+    setCancelledIds(nextCancelled);
+    localStorage.setItem("hostflow_cancelled_message_ids_v1", JSON.stringify(nextCancelled));
+    const nextStatus = { ...statusOverrides, [selected.id]: { ...(statusOverrides[selected.id] || {}), status: "pending", error_message: "" } };
+    saveStatusOverrides(nextStatus);
+  }
+
+  const selectedConversation = conversations.find(c => String(c.guest_phone) === String(selectedChatPhone)) || conversations[0];
 
   return <>
     <h2>Messaggi automatici</h2>
@@ -390,8 +518,13 @@ function MessagesTab({ property, rows }) {
     <label className="hf-check hf-template-toggle"><input type="checkbox" checked={showTemplates} onChange={e => setShowTemplates(e.target.checked)} />Mostra template</label>
     {showTemplates && <div className="hf-form-box"><h3>Template messaggi</h3>{Object.entries(DEFAULT_SCHEDULES).map(([key, rule]) => <div key={key}><label>{rule.label}</label><textarea value={templates[key] || ""} onChange={e => updateTemplate(key, e.target.value)} /><div className="hf-grid-2"><label>Offset giorni<input type="number" value={schedules[key]?.offsetDays ?? 0} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], offsetDays: Number(e.target.value) } }))} /></label><label>Ora invio<input value={schedules[key]?.time || ""} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], time: e.target.value } }))} /></label></div></div>)}<button type="button" className="hf-primary-full" onClick={saveTemplates}>Salva template messaggi</button>{msg && <div className="hf-success">{msg}</div>}</div>}
     <h2>Messaggi programmati</h2>
-    <div className="hf-metrics"><Metric label="Da inviare" value={pendingCount} /><Metric label="Inviati" value="0" /><Metric label="Falliti" value="0" /><Metric label="Annullati" value={cancelledCount} /></div>
-    <div className="hf-messages-layout"><div><h2>Prossimi messaggi</h2><p className="hf-muted">Lista essenziale, ordinata per soggiorno e data di invio.</p>{scheduledMessages.length ? <div className="hf-message-list">{scheduledMessages.map((m, index) => <button type="button" key={m.id} className={`hf-message-item status-${m.status} ${selected?.id === m.id ? "active" : ""} ${m.status === "cancelled" ? "cancelled" : ""}`} onClick={() => setSelectedId(m.id)}><span className="hf-message-dot">{selected?.id === m.id ? "●" : "○"}</span><span>#{index + 1} · {m.row.guest_name || "Ospite"} · {m.row.guest_phone} · {m.label} · {formatItalianDate(m.sendDate)}</span><small>{m.sendTime}</small></button>)}</div> : <div className="hf-info">Nessun messaggio programmato. Verranno mostrati solo ospiti con telefono e prenotazioni correnti o future.</div>}</div><div><h2>Dettaglio messaggio</h2>{selected ? <><div className={`hf-message-card ${selected.status === "cancelled" ? "cancelled" : ""}`}><div className={`hf-status-pill status-${selected.status}`}>{selected.status === "cancelled" ? "Annullato" : selected.status === "sent" ? "Inviato" : selected.status === "failed" ? "Fallito" : "In attesa di invio"}</div><h3>{selected.row.guest_name || "Ospite"}</h3><p>{selected.label} · whatsapp · Invio previsto: {formatItalianDate(selected.sendDate)} {selected.sendTime}</p></div><div className="hf-grid-2"><label>Telefono<input value={selected.row.guest_phone || ""} readOnly /></label><label>Piattaforma<input value={selected.row.platform || ""} readOnly /></label></div><label>Anteprima messaggio</label><textarea value={selected.text} readOnly className="hf-message-preview" /><div className="hf-info">WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.</div><div className="hf-actions"><button type="button" disabled={selected.status === "cancelled"}>Invia WhatsApp ora</button>{selected.status === "cancelled" ? <button type="button" onClick={restoreSelected}>Ripristina</button> : <button type="button" onClick={cancelSelected}>Annulla</button>}</div></> : <div className="hf-info">Seleziona un messaggio dalla lista.</div>}</div></div>
+    <div className="hf-actions"><button type="button" onClick={syncScheduledMessages} disabled={syncingSchedule || !scheduledMessages.length}>{syncingSchedule ? "Sincronizzo..." : "Genera / aggiorna messaggi programmati"}</button></div>
+    <div className="hf-metrics"><Metric label="Da inviare" value={pendingCount} /><Metric label="Inviati" value={sentCount} /><Metric label="Falliti" value={failedCount} /><Metric label="Annullati" value={cancelledCount} /></div>
+    <div className="hf-messages-layout"><div><h2>Prossimi messaggi</h2><p className="hf-muted">Lista essenziale, ordinata per soggiorno e data di invio.</p>{scheduledMessages.length ? <div className="hf-message-list">{scheduledMessages.map((m, index) => <button type="button" key={m.id} className={`hf-message-item status-${m.status} ${selected?.id === m.id ? "active" : ""} ${m.status === "cancelled" ? "cancelled" : ""}`} onClick={() => setSelectedId(m.id)}><span className="hf-message-dot">{selected?.id === m.id ? "●" : "○"}</span><span>#{index + 1} · {m.row.guest_name || "Ospite"} · {m.row.guest_phone} · {m.label} · {formatItalianDate(m.sendDate)}</span><small>{m.sendTime}</small></button>)}</div> : <div className="hf-info">Nessun messaggio programmato. Verranno mostrati solo ospiti con telefono e prenotazioni correnti o future.</div>}</div><div><h2>Dettaglio messaggio</h2>{selected ? <><div className={`hf-message-card ${selected.status === "cancelled" ? "cancelled" : ""}`}><div className={`hf-status-pill status-${selected.status}`}>{selected.status === "cancelled" ? "Annullato" : selected.status === "sent" ? "Inviato" : selected.status === "failed" ? "Fallito" : "In attesa di invio"}</div><h3>{selected.row.guest_name || "Ospite"}</h3><p>{selected.label} · whatsapp · Invio previsto: {formatItalianDate(selected.sendDate)} {selected.sendTime}</p></div><div className="hf-grid-2"><label>Telefono<input value={selected.row.guest_phone || ""} readOnly /></label><label>Piattaforma<input value={selected.row.platform || ""} readOnly /></label></div><label>Anteprima messaggio</label><textarea value={selected.text} readOnly className="hf-message-preview" />{selected.error_message && <div className="hf-info">Errore ultimo invio: {selected.error_message}</div>}<div className="hf-info">WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.</div><div className="hf-actions"><button type="button" disabled={sending} onClick={sendSelected}>{sending ? "Invio..." : "Invia WhatsApp ora"}</button>{selected.status === "cancelled" ? <button type="button" onClick={restoreSelected}>Ripristina</button> : <button type="button" onClick={cancelSelected}>Annulla</button>}</div>{actionMsg && <div className={actionMsg.toLowerCase().includes("fall") || actionMsg.toLowerCase().includes("erro") ? "hf-info" : "hf-success"}>{actionMsg}</div>}</> : <div className="hf-info">Seleziona un messaggio dalla lista.</div>}</div></div>
+
+    <h2>Inbox WhatsApp</h2>
+    <div className="hf-actions"><button type="button" onClick={loadChat} disabled={chatLoading}>{chatLoading ? "Aggiorno..." : "Aggiorna chat"}</button></div>
+    <div className="hf-messages-layout"><div><h2>Conversazioni</h2>{conversations.length ? <div className="hf-message-list">{conversations.map((c) => <button type="button" key={c.guest_phone} className={`hf-message-item ${selectedConversation?.guest_phone === c.guest_phone ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}><span className="hf-message-dot">○</span><span>{c.guest_name || "Ospite"} · {c.guest_phone}</span><small>{c.last_message || ""}</small></button>)}</div> : <div className="hf-info">Nessuna risposta ancora ricevuta. Le risposte entreranno qui dal webhook Meta.</div>}</div><div><h2>Chat</h2>{selectedConversation ? <div className="hf-form-box">{(selectedConversation.messages || []).map((m) => <div key={m.id} className={`hf-message-card ${m.direction === "outbound" ? "" : "active"}`}><div className={`hf-status-pill status-${m.status || "pending"}`}>{m.direction === "outbound" ? "HostFlow" : "Ospite"} · {m.status}</div><p>{m.message_text}</p><small>{m.created_at ? new Date(m.created_at).toLocaleString("it-IT") : ""}</small></div>)}</div> : <div className="hf-info">Seleziona una conversazione.</div>}</div></div>
   </>;
 }
 function PulizieTab({ settings, rows, services, setServices }) {
@@ -581,5 +714,5 @@ export default function DashboardPage() {
   function logout() { localStorage.removeItem("hostflow_token"); localStorage.removeItem("hostflow_user"); router.push("/"); }
   const mergedCustomRows = useMemo(() => mergeCustomRows(customRows, optimisticCustomRows), [customRows, optimisticCustomRows]); const rawRows = useMemo(() => [...baseRows, ...mergedCustomRows], [baseRows, mergedCustomRows]); const enrichedRows = useMemo(() => rawRows.map(r => enrichRow(r, settings, rawRows, cleaningServices)), [rawRows, settings, cleaningServices]); const filteredRows = useMemo(() => enrichedRows.filter(r => rowInPeriod(r, settings)), [enrichedRows, settings]); const [, , periodLabel] = periodRange(settings);
   if (!token) return <main className="hf-loading">Caricamento...</main>;
-  return <main className={`hf-app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}><Sidebar token={token} settings={settings} setSettings={setSettings} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} sidebarWidth={sidebarWidth} setSidebarWidth={setSidebarWidth} onLogout={logout} onUploaded={() => setRefreshKey(x => x + 1)} /><section className="hf-main"><header><div><h1>HostFlow v5</h1><p>Dashboard host con import Booking, netto reale, immobile, analisi mercato e pricing regolabile</p></div></header><nav className="hf-tabs">{MAIN_TABS.map(t => <button type="button" key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>)}</nav>{tab === "Dashboard" && <DashboardTab token={token} rows={filteredRows} allRows={enrichedRows} customRows={mergedCustomRows} refresh={() => setRefreshKey(x => x + 1)} settings={settings} periodLabel={periodLabel} onCustomCreated={(row) => setOptimisticCustomRows(prev => mergeCustomRows(prev, [row]))} />}{tab === "Immobile" && <ImmobileTab property={property} setProperty={setProperty} onboarding={onboarding} setOnboarding={setOnboarding} />}{tab === "Analisi mercato" && <MarketTab property={property} />}{tab === "Pricing" && <PricingTab rows={filteredRows} settings={settings} />}{tab === "Messaggi" && <MessagesTab property={property} rows={filteredRows} />}{tab === "Pulizie" && <PulizieTab settings={settings} rows={filteredRows} services={cleaningServices} setServices={setCleaningServices} />}{tab === "Dati" && <DatiTab rows={filteredRows} />}</section></main>;
+  return <main className={`hf-app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}><Sidebar token={token} settings={settings} setSettings={setSettings} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} sidebarWidth={sidebarWidth} setSidebarWidth={setSidebarWidth} onLogout={logout} onUploaded={() => setRefreshKey(x => x + 1)} /><section className="hf-main"><header><div><h1>HostFlow v5</h1><p>Dashboard host con import Booking, netto reale, immobile, analisi mercato e pricing regolabile</p></div></header><nav className="hf-tabs">{MAIN_TABS.map(t => <button type="button" key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>)}</nav>{tab === "Dashboard" && <DashboardTab token={token} rows={filteredRows} allRows={enrichedRows} customRows={mergedCustomRows} refresh={() => setRefreshKey(x => x + 1)} settings={settings} periodLabel={periodLabel} onCustomCreated={(row) => setOptimisticCustomRows(prev => mergeCustomRows(prev, [row]))} />}{tab === "Immobile" && <ImmobileTab property={property} setProperty={setProperty} onboarding={onboarding} setOnboarding={setOnboarding} />}{tab === "Analisi mercato" && <MarketTab property={property} />}{tab === "Pricing" && <PricingTab rows={filteredRows} settings={settings} />}{tab === "Messaggi" && <MessagesTab token={token} property={property} rows={filteredRows} />}{tab === "Pulizie" && <PulizieTab settings={settings} rows={filteredRows} services={cleaningServices} setServices={setCleaningServices} />}{tab === "Dati" && <DatiTab rows={filteredRows} />}</section></main>;
 }
