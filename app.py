@@ -35,24 +35,33 @@ from pricing_service import run_pricing_analysis
 
 
 def normalize_whatsapp_phone(phone_number):
-    """Normalizza un numero in formato E.164 per WhatsApp Cloud API."""
     raw = str(phone_number or "").strip()
     if not raw:
         return ""
 
+    # Rimuove tutto tranne numeri e +
     cleaned = re.sub(r"[^0-9+]", "", raw)
-    if cleaned.startswith("00"):
-        cleaned = "+" + cleaned[2:]
-    if cleaned.startswith("+"):
-        return cleaned
 
+    # Rimuove 00 iniziale
+    if cleaned.startswith("00"):
+        cleaned = cleaned[2:]
+
+    # Rimuove +
+    if cleaned.startswith("+"):
+        cleaned = cleaned[1:]
+
+    # Solo numeri
     digits = re.sub(r"\D", "", cleaned)
-    # Default Italia: mobile senza prefisso internazionale, es. 3921234567
+
+    # Se è numero italiano senza prefisso (es: 392...)
     if len(digits) == 10 and digits.startswith("3"):
-        return "+39" + digits
+        return "39" + digits
+
+    # Se ha già 39
     if digits.startswith("39"):
-        return "+" + digits
-    return "+" + digits if digits else ""
+        return digits
+
+    return digits
 
 
 def whatsapp_cloud_config():
@@ -78,15 +87,25 @@ def send_whatsapp_message(phone_number, message_text):
     """
     cfg = whatsapp_cloud_config()
     if not cfg["access_token"] or not cfg["phone_number_id"]:
-        return False, "Config WhatsApp Cloud API mancante: imposta WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID su Render."
+        return False, {
+            "error": "Config WhatsApp Cloud API mancante: imposta WHATSAPP_ACCESS_TOKEN e WHATSAPP_PHONE_NUMBER_ID su Render.",
+            "numero_inviato_a_meta": normalize_whatsapp_phone(phone_number),
+        }
 
     phone = normalize_whatsapp_phone(phone_number)
     if not phone:
-        return False, "Numero ospite mancante o non valido."
+        return False, {
+            "error": "Numero ospite mancante o non valido.",
+            "numero_originale": str(phone_number or ""),
+            "numero_inviato_a_meta": "",
+        }
 
     text = str(message_text or "").strip()
     if not text:
-        return False, "Testo messaggio vuoto."
+        return False, {
+            "error": "Testo messaggio vuoto.",
+            "numero_inviato_a_meta": phone,
+        }
 
     url = f"https://graph.facebook.com/{cfg['api_version']}/{cfg['phone_number_id']}/messages"
     headers = {
@@ -115,9 +134,28 @@ def send_whatsapp_message(phone_number, message_text):
                 message_id = ""
             return True, message_id or data
 
-        return False, data
+        error_text = str(data.get("error", data)) if isinstance(data, dict) else str(data)
+        if "131030" in error_text:
+            return False, {
+                "status_code": response.status_code,
+                "error": "(#131030) Recipient phone number not in allowed list",
+                "numero_originale": str(phone_number or ""),
+                "numero_inviato_a_meta": phone,
+                "nota": "In modalità test Meta il destinatario deve essere nella allowed list della stessa app/phone_number_id ed essere verificato.",
+            }
+
+        return False, {
+            "status_code": response.status_code,
+            "error": data,
+            "numero_originale": str(phone_number or ""),
+            "numero_inviato_a_meta": phone,
+        }
     except Exception as exc:
-        return False, str(exc)
+        return False, {
+            "error": str(exc),
+            "numero_originale": str(phone_number or ""),
+            "numero_inviato_a_meta": phone,
+        }
 
 
 # ---------------------------
@@ -443,7 +481,21 @@ DB_PATH = "hostflow_auth.db"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
 
+HOSTFLOW_API_BASE_URL = os.getenv("HOSTFLOW_API_BASE_URL", "https://hostflow-backend.onrender.com").strip().rstrip("/")
+HOSTFLOW_WEB_LOGIN_URL = os.getenv("HOSTFLOW_WEB_LOGIN_URL", "https://hostflow-web.onrender.com/login").strip()
+HOSTFLOW_CUSTOM_API_VERSION = "custom-api-fast-2026-04-29"
+
 SESSION_TIMEOUT_MINUTES = 10
+
+
+@st.cache_resource(show_spinner=False)
+def get_http_session():
+    """Riusa la stessa connessione HTTP verso FastAPI per ridurre la latenza tra click successivi."""
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 
 class PostgresDictCursor(RealDictCursor if RealDictCursor else object):
@@ -593,6 +645,7 @@ def ensure_booking_dataframe_columns(df):
     for col in text_cols:
         df[col] = df[col].fillna("").astype(str)
 
+    df["guest_phone"] = df["guest_phone"].apply(normalize_whatsapp_phone)
     df["status"] = df["status"].replace("", "confirmed").apply(normalize_status)
     df["guests"] = df["guests"].astype(int).clip(lower=1)
     return df
@@ -1450,6 +1503,375 @@ def autentica_da_token(token):
     return {"id": row["utente_id"], "email": row["email"], "token": token}
 
 
+
+
+def get_query_param_value(name):
+    try:
+        value = st.query_params.get(name)
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
+    except Exception:
+        return None
+
+
+def backend_api_request(method, path, token=None, json_payload=None, files=None, data_payload=None, timeout=20):
+    url = f"{HOSTFLOW_API_BASE_URL}{path}"
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    request_kwargs = {
+        "headers": headers,
+        "timeout": timeout,
+    }
+    if files is not None:
+        request_kwargs["files"] = files
+    if data_payload is not None:
+        request_kwargs["data"] = data_payload
+    if json_payload is not None and files is None:
+        request_kwargs["json"] = json_payload
+
+    response = get_http_session().request(method, url, **request_kwargs)
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"error": response.text}
+
+    return response.status_code, data
+
+
+def backend_login(email, password):
+    status_code, data = backend_api_request(
+        "POST",
+        "/auth/login",
+        json_payload={
+            "email": str(email or "").strip().lower(),
+            "password": str(password or ""),
+        },
+    )
+    if status_code == 200 and data.get("access_token"):
+        return True, data, None
+    return False, None, data.get("error") or "Login non riuscito."
+
+
+def backend_register(email, password):
+    status_code, data = backend_api_request(
+        "POST",
+        "/auth/register",
+        json_payload={
+            "email": str(email or "").strip().lower(),
+            "password": str(password or ""),
+        },
+    )
+    if status_code in [200, 201] and data.get("status") == "ok":
+        return True, data, None
+    return False, None, data.get("error") or "Registrazione non riuscita."
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def backend_auth_me(token):
+    if not token:
+        return None
+    try:
+        status_code, data = backend_api_request("GET", "/auth/me", token=token, timeout=8)
+        if status_code != 200:
+            return None
+        user = data.get("user") if isinstance(data, dict) else None
+        if not user:
+            return None
+        return dict(user)
+    except Exception:
+        return None
+
+
+def backend_upload_reservations(uploaded_file, token):
+    if uploaded_file is None:
+        return False, "Nessun file caricato."
+
+    filename = str(getattr(uploaded_file, "name", "prenotazioni.xlsx") or "prenotazioni.xlsx")
+    ext = Path(filename).suffix.lower()
+    if ext not in [".xls", ".xlsx"]:
+        return False, "Il backend attuale supporta upload Booking in formato Excel .xls/.xlsx. Per CSV useremo il supporto nel prossimo step."
+
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    file_bytes = uploaded_file.getvalue()
+
+    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == ".xls":
+        content_type = "application/vnd.ms-excel"
+
+    files = {"file": (filename, file_bytes, content_type)}
+    status_code, data = backend_api_request(
+        "POST",
+        "/reservations/upload",
+        token=token,
+        files=files,
+        timeout=60,
+    )
+
+    if status_code == 200 and isinstance(data, dict) and data.get("status") == "ok":
+        inserted = int(data.get("inserted", 0) or 0)
+        skipped = int(data.get("skipped", 0) or 0)
+        return True, f"Prenotazioni caricate sul backend: {inserted} inserite, {skipped} saltate."
+
+    message = "Upload prenotazioni non riuscito."
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("error") or data.get("detail") or message
+    return False, message
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def backend_reservations_cached(api_base_url, token, refresh_nonce):
+    # refresh_nonce serve solo a invalidare la cache dopo un nuovo upload.
+    return backend_api_request("GET", "/reservations", token=token, timeout=12)
+
+
+def backend_reservations_to_dataframe(token):
+    refresh_nonce = int(st.session_state.get("backend_reservations_refresh_nonce", 0) or 0)
+    status_code, data = backend_reservations_cached(HOSTFLOW_API_BASE_URL, token, refresh_nonce)
+    if status_code != 200:
+        message = "Impossibile leggere le prenotazioni dal backend."
+        if isinstance(data, dict):
+            message = data.get("message") or data.get("error") or data.get("detail") or message
+        raise RuntimeError(message)
+
+    reservations = data.get("reservations", []) if isinstance(data, dict) else []
+    if not reservations:
+        return ensure_booking_dataframe_columns(pd.DataFrame())
+
+    df_backend = pd.DataFrame(reservations)
+    for col, default in {
+        "platform": "Booking",
+        "guest_name": "",
+        "guest_phone": "",
+        "check_in": pd.NaT,
+        "check_out": pd.NaT,
+        "total_price": 0.0,
+        "status": "confirmed",
+    }.items():
+        if col not in df_backend.columns:
+            df_backend[col] = default
+
+    df_backend["check_in"] = pd.to_datetime(df_backend["check_in"], errors="coerce").dt.date
+    df_backend["check_out"] = pd.to_datetime(df_backend["check_out"], errors="coerce").dt.date
+    df_backend["total_price"] = pd.to_numeric(df_backend["total_price"], errors="coerce").fillna(0.0)
+    df_backend["cleaning_cost"] = 0.0
+    df_backend["platform_fee"] = 0.0
+    df_backend["transaction_cost"] = 0.0
+    df_backend["raw_booking_status"] = df_backend["status"].fillna("confirmed").astype(str)
+    df_backend["status"] = df_backend["status"].fillna("confirmed").astype(str).apply(normalize_status)
+    df_backend["guests"] = 1
+    df_backend["notes"] = ""
+    return ensure_booking_dataframe_columns(df_backend)
+
+
+
+
+# ---------------------------
+# API prenotazioni custom
+# ---------------------------
+def _invalidate_custom_bookings_cache():
+    st.session_state["backend_custom_bookings_refresh_nonce"] = int(
+        st.session_state.get("backend_custom_bookings_refresh_nonce", 0) or 0
+    ) + 1
+    try:
+        backend_custom_bookings_cached.clear()
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def backend_custom_bookings_cached(api_base_url, token, refresh_nonce):
+    # refresh_nonce serve solo a invalidare la cache dopo create/update/delete.
+    return backend_api_request("GET", "/reservations/custom", token=token, timeout=30)
+
+
+def backend_custom_bookings_to_dataframe(token):
+    refresh_nonce = int(st.session_state.get("backend_custom_bookings_refresh_nonce", 0) or 0)
+    status_code, data = backend_custom_bookings_cached(HOSTFLOW_API_BASE_URL, token, refresh_nonce)
+    if status_code != 200:
+        message = "Impossibile leggere le prenotazioni custom dal backend."
+        if isinstance(data, dict):
+            message = data.get("message") or data.get("error") or data.get("detail") or message
+        raise RuntimeError(message)
+
+    records = data.get("custom_bookings", []) if isinstance(data, dict) else []
+    columns = [
+        "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
+        "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
+        "raw_booking_status", "status", "guests", "notes"
+    ]
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    df_backend = pd.DataFrame(records)
+    for col in columns:
+        if col not in df_backend.columns:
+            df_backend[col] = ""
+
+    df_backend["id"] = pd.to_numeric(df_backend["id"], errors="coerce").fillna(0).astype(int)
+    df_backend["platform"] = df_backend["platform"].fillna("Custom").astype(str).replace("", "Custom")
+    df_backend["guest_name"] = df_backend["guest_name"].fillna("").astype(str).str.strip()
+    df_backend["guest_phone"] = df_backend["guest_phone"].fillna("").astype(str).apply(normalize_whatsapp_phone)
+    df_backend["check_in"] = pd.to_datetime(df_backend["check_in"], errors="coerce").dt.date
+    df_backend["check_out"] = pd.to_datetime(df_backend["check_out"], errors="coerce").dt.date
+
+    for col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
+        df_backend[col] = pd.to_numeric(df_backend[col], errors="coerce").fillna(0)
+
+    df_backend["guests"] = df_backend["guests"].astype(int).clip(lower=1)
+    df_backend["status"] = df_backend["status"].fillna("confirmed").astype(str).apply(normalize_status)
+    df_backend["raw_booking_status"] = df_backend["raw_booking_status"].fillna(df_backend["status"]).astype(str)
+    df_backend["notes"] = df_backend["notes"].fillna("").astype(str)
+
+    valid_mask = (
+        (df_backend["id"] > 0)
+        & df_backend["guest_name"].ne("")
+        & pd.to_datetime(df_backend["check_in"], errors="coerce").notna()
+        & pd.to_datetime(df_backend["check_out"], errors="coerce").notna()
+    )
+    df_backend = df_backend[valid_mask].copy()
+
+    return df_backend[columns].reset_index(drop=True)
+
+
+def backend_create_custom_booking(payload, token):
+    status_code, data = backend_api_request(
+        "POST",
+        "/reservations/custom",
+        token=token,
+        json_payload=payload,
+        timeout=30,
+    )
+
+    if status_code in [200, 201] and isinstance(data, dict) and data.get("status") == "ok":
+        _invalidate_custom_bookings_cache()
+        booking = data.get("custom_booking") or {}
+        return True, booking, None
+
+    message = "Salvataggio prenotazione custom non riuscito."
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("error") or data.get("detail") or message
+    return False, None, message
+
+
+def backend_update_custom_booking(booking_id, payload, token):
+    status_code, data = backend_api_request(
+        "PUT",
+        f"/reservations/custom/{int(booking_id)}",
+        token=token,
+        json_payload=payload,
+        timeout=30,
+    )
+
+    if status_code == 200 and isinstance(data, dict) and data.get("status") == "ok":
+        _invalidate_custom_bookings_cache()
+        booking = data.get("custom_booking") or {}
+        return True, booking, None
+
+    message = "Aggiornamento prenotazione custom non riuscito."
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("error") or data.get("detail") or message
+    return False, None, message
+
+
+def backend_delete_custom_booking(booking_id, token):
+    status_code, data = backend_api_request(
+        "DELETE",
+        f"/reservations/custom/{int(booking_id)}",
+        token=token,
+        timeout=30,
+    )
+
+    if status_code == 200 and isinstance(data, dict) and data.get("status") == "ok":
+        _invalidate_custom_bookings_cache()
+        return True, None
+
+    message = "Eliminazione prenotazione custom non riuscita."
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("error") or data.get("detail") or message
+    return False, message
+
+
+def ensure_legacy_user_for_backend_user(backend_user):
+    email = str(backend_user.get("email", "") or "").strip().lower()
+    backend_id = int(backend_user.get("id") or 0)
+    if not email:
+        raise RuntimeError("Utente backend senza email.")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, email FROM utenti WHERE email = ? LIMIT 1", (email,))
+        existing = cur.fetchone()
+        if existing:
+            return int(existing["id"])
+
+        placeholder_salt = secrets.token_hex(16)
+        placeholder_hash = "backend_auth_only"
+
+        if backend_id > 0:
+            try:
+                cur.execute(
+                    "INSERT INTO utenti (id, email, password_hash, salt) VALUES (?, ?, ?, ?)",
+                    (backend_id, email, placeholder_hash, placeholder_salt),
+                )
+                conn.commit()
+                return backend_id
+            except Exception:
+                conn.rollback()
+
+        cur.execute(
+            "INSERT INTO utenti (email, password_hash, salt) VALUES (?, ?, ?)",
+            (email, placeholder_hash, placeholder_salt),
+        )
+        conn.commit()
+        cur.execute("SELECT id FROM utenti WHERE email = ? LIMIT 1", (email,))
+        created = cur.fetchone()
+        return int(created["id"])
+    finally:
+        conn.close()
+
+
+def set_authenticated_user_from_backend(token, backend_user):
+    local_user_id = ensure_legacy_user_for_backend_user(backend_user)
+    st.session_state.utente = {
+        "id": local_user_id,
+        "email": backend_user.get("email", ""),
+        "backend_user_id": backend_user.get("id"),
+    }
+    st.session_state.auth_token = token
+    st.session_state.profilo_immobile = carica_profilo_immobile(local_user_id)
+    return st.session_state.utente
+
+
+def try_authenticate_from_backend_token():
+    token = get_query_param_value("token") or get_query_param_value("session") or st.session_state.get("auth_token")
+    if not token:
+        return False
+
+    backend_user = backend_auth_me(token)
+    if not backend_user:
+        st.session_state.auth_token = None
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        return False
+
+    set_authenticated_user_from_backend(token, backend_user)
+    try:
+        st.query_params["token"] = token
+    except Exception:
+        pass
+    return True
+
+
 def profilo_default():
     return {
         "nome_immobile": "",
@@ -1646,120 +2068,31 @@ def load_message_settings(utente_id):
 
 
 def save_custom_booking(utente_id, data):
-    """Salva una prenotazione custom e restituisce l'ID creato.
-    Non usa fallback in sessione: la riga deve essere scritta davvero nel database.
-    """
+    """Salva una prenotazione custom tramite FastAPI/Postgres e restituisce l'ID creato."""
     payload = normalize_custom_booking_payload(data)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        if USE_POSTGRES:
-            cur.execute(
-                """
-                INSERT INTO custom_bookings (
-                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-                    status, guests, notes, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                RETURNING id
-                """,
-                (
-                    int(utente_id),
-                    "Custom",
-                    payload["guest_name"],
-                    payload["guest_phone"],
-                    payload["check_in"],
-                    payload["check_out"],
-                    payload["total_price"],
-                    payload["cleaning_cost"],
-                    payload["platform_fee"],
-                    payload["transaction_cost"],
-                    payload["raw_booking_status"],
-                    payload["status"],
-                    payload["guests"],
-                    payload["notes"],
-                ),
-            )
-            inserted = cur.fetchone()
-            inserted_dict = dict(inserted) if inserted else {}
-            new_id = inserted_dict.get("id")
-        else:
-            cur.execute(
-                """
-                INSERT INTO custom_bookings (
-                    utente_id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                    cleaning_cost, platform_fee, transaction_cost, raw_booking_status,
-                    status, guests, notes, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    int(utente_id),
-                    "Custom",
-                    payload["guest_name"],
-                    payload["guest_phone"],
-                    payload["check_in"],
-                    payload["check_out"],
-                    payload["total_price"],
-                    payload["cleaning_cost"],
-                    payload["platform_fee"],
-                    payload["transaction_cost"],
-                    payload["raw_booking_status"],
-                    payload["status"],
-                    payload["guests"],
-                    payload["notes"],
-                ),
-            )
-            new_id = cur.lastrowid
-
-        if new_id is None:
-            raise RuntimeError("Il database non ha restituito l'ID della prenotazione custom.")
-
-        cur.execute(
-            "SELECT id FROM custom_bookings WHERE utente_id = ? AND id = ?",
-            (int(utente_id), int(new_id)),
-        )
-        if not cur.fetchone():
-            raise RuntimeError("La riga custom non è stata trovata subito dopo l'insert.")
-
-        conn.commit()
-        return int(new_id)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    ok, booking, error = backend_create_custom_booking(payload, st.session_state.get("auth_token"))
+    if not ok:
+        raise RuntimeError(error or "Errore salvataggio prenotazione custom.")
+    new_id = int(booking.get("id") or 0)
+    if new_id <= 0:
+        raise RuntimeError("Il backend non ha restituito l'ID della prenotazione custom.")
+    return new_id
 
 def get_custom_booking_by_id(utente_id, booking_id):
-    """Legge una prenotazione custom direttamente dal database, senza filtri distruttivi."""
+    """Legge una prenotazione custom dalla cache/API backend."""
     if booking_id is None:
         return None
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                   cleaning_cost, platform_fee, transaction_cost, raw_booking_status, status, guests, notes
-            FROM custom_bookings
-            WHERE utente_id = ? AND id = ?
-            """,
-            (int(utente_id), int(booking_id)),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        return dict(row)
-    finally:
-        conn.close()
-
+    df = load_custom_bookings(utente_id)
+    if df.empty or "id" not in df.columns:
+        return None
+    match = df[pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int) == int(booking_id)]
+    if match.empty:
+        return None
+    return match.iloc[0].to_dict()
 
 def normalize_custom_booking_payload(data):
     guest_name_clean = str(data.get("guest_name", "") or "").strip()
-    guest_phone_clean = str(data.get("guest_phone", "") or "").strip()
+    guest_phone_clean = normalize_whatsapp_phone(data.get("guest_phone", ""))
 
     if not guest_name_clean or guest_name_clean.lower() in ["guest_name", "nome ospite"]:
         raise ValueError("Nome ospite non valido.")
@@ -1794,109 +2127,23 @@ def normalize_custom_booking_payload(data):
 
 def update_custom_booking(utente_id, booking_id, data):
     payload = normalize_custom_booking_payload(data)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            UPDATE custom_bookings
-            SET guest_name = ?, guest_phone = ?, check_in = ?, check_out = ?, total_price = ?,
-                cleaning_cost = ?, platform_fee = ?, transaction_cost = ?,
-                raw_booking_status = ?, status = ?, guests = ?, notes = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND utente_id = ?
-            """,
-            (
-                payload["guest_name"],
-                payload["guest_phone"],
-                payload["check_in"],
-                payload["check_out"],
-                payload["total_price"],
-                payload["cleaning_cost"],
-                payload["platform_fee"],
-                payload["transaction_cost"],
-                payload["raw_booking_status"],
-                payload["status"],
-                payload["guests"],
-                payload["notes"],
-                int(booking_id),
-                int(utente_id),
-            ),
-        )
-        changed = cur.rowcount
-        conn.commit()
-        return changed > 0
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    ok, booking, error = backend_update_custom_booking(
+        int(booking_id),
+        payload,
+        st.session_state.get("auth_token"),
+    )
+    if not ok:
+        raise RuntimeError(error or "Errore aggiornamento prenotazione custom.")
+    return True
 
 def delete_custom_booking(utente_id, booking_id):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT platform, guest_name, check_in, check_out FROM custom_bookings WHERE id = ? AND utente_id = ?",
-            (int(booking_id), int(utente_id)),
-        )
-        row = cur.fetchone()
-
-        cur.execute(
-            "DELETE FROM custom_bookings WHERE id = ? AND utente_id = ?",
-            (int(booking_id), int(utente_id)),
-        )
-        changed = cur.rowcount
-
-        if row:
-            try:
-                row_dict = dict(row)
-                platform = str(row_dict.get("platform", "Custom") or "Custom").strip() or "Custom"
-                guest_name = str(row_dict.get("guest_name", "") or "").strip()
-                check_in = pd.to_datetime(row_dict.get("check_in"), errors="coerce")
-                check_out = pd.to_datetime(row_dict.get("check_out"), errors="coerce")
-
-                if guest_name and pd.notna(check_in) and pd.notna(check_out):
-                    check_in_iso = check_in.date().isoformat()
-                    check_out_iso = check_out.date().isoformat()
-
-                    booking_ref_pipe = f"{platform}|{guest_name}|{check_in_iso}|{check_out_iso}"
-                    booking_ref_bars = f"{platform}||{guest_name}||{check_in_iso}||{check_out_iso}"
-
-                    # Quando elimino una prenotazione custom dalla dashboard, elimino anche
-                    # i messaggi programmati e i servizi pulizia collegati a quella prenotazione.
-                    cur.execute(
-                        "DELETE FROM scheduled_messages WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
-                        (int(utente_id), booking_ref_pipe, booking_ref_bars),
-                    )
-                    cur.execute(
-                        "DELETE FROM cleaning_services WHERE utente_id = ? AND (booking_ref = ? OR booking_ref = ?)",
-                        (int(utente_id), booking_ref_pipe, booking_ref_bars),
-                    )
-
-                    # Fallback prudente: elimina eventuali servizi pulizia salvati prima del booking_ref
-                    # ma associati allo stesso ospite e alla stessa data di check-out.
-                    cur.execute(
-                        """
-                        DELETE FROM cleaning_services
-                        WHERE utente_id = ?
-                          AND TRIM(COALESCE(guest_name, '')) = ?
-                          AND service_date = ?
-                        """,
-                        (int(utente_id), guest_name, check_out_iso),
-                    )
-            except Exception:
-                pass
-
-        conn.commit()
-        return changed > 0
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
+    ok, error = backend_delete_custom_booking(
+        int(booking_id),
+        st.session_state.get("auth_token"),
+    )
+    if not ok:
+        raise RuntimeError(error or "Errore eliminazione prenotazione custom.")
+    return True
 
 def cleanup_bad_custom_bookings(utente_id):
     """Elimina righe sporche create durante test/migrazione Postgres."""
@@ -1928,94 +2175,21 @@ def cleanup_bad_custom_bookings(utente_id):
 
 
 def load_custom_bookings(utente_id):
-    """Carica le prenotazioni custom dal database in modo compatibile con Render/Postgres.
+    """Carica le prenotazioni custom dal backend FastAPI/Postgres.
 
-    Nota importante: qui NON usiamo pd.read_sql_query, perché su Render/Postgres può dare
-    risultati non affidabili con il cursor custom usato per convertire i placeholder SQLite.
-    Usiamo invece cur.execute + fetchall, così la stessa logica funziona sia in locale
-    sia su Render con DATABASE_URL.
+    Questo evita che Streamlit scriva direttamente nel database e rende le azioni
+    Salva/Aggiorna/Elimina più coerenti con l'architettura production.
     """
-    conn = get_conn()
-    cur = conn.cursor()
     try:
-        cur.execute(
-            """
-            SELECT id, platform, guest_name, guest_phone, check_in, check_out, total_price,
-                   cleaning_cost, platform_fee, transaction_cost,
-                   raw_booking_status, status, guests, notes
-            FROM custom_bookings
-            WHERE utente_id = ?
-            ORDER BY check_in ASC, id ASC
-            """,
-            (int(utente_id),),
-        )
-        rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
+        return backend_custom_bookings_to_dataframe(st.session_state.get("auth_token"))
+    except Exception as exc:
+        # In caso di backend momentaneamente non disponibile, non blocchiamo tutta la dashboard.
+        st.session_state["custom_booking_action_error"] = str(exc)
         return pd.DataFrame(columns=[
             "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
             "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
             "raw_booking_status", "status", "guests", "notes"
         ])
-
-    df = pd.DataFrame([dict(row) for row in rows])
-
-    # Normalizzazione molto permissiva: una riga appena salvata non deve sparire dalla UI
-    # per piccoli problemi di tipo dati. La scartiamo solo se manca davvero un dato essenziale.
-    df["id"] = pd.to_numeric(df.get("id", 0), errors="coerce").fillna(0).astype(int)
-    df["platform"] = df.get("platform", "Custom").fillna("Custom").astype(str).replace("", "Custom")
-    df["guest_name"] = df.get("guest_name", "").fillna("").astype(str).str.strip()
-    df["guest_phone"] = df.get("guest_phone", "").fillna("").astype(str).str.strip()
-
-    check_in_dt = pd.to_datetime(df.get("check_in"), errors="coerce")
-    check_out_dt = pd.to_datetime(df.get("check_out"), errors="coerce")
-
-    valid_mask = (
-        (df["id"] > 0)
-        & df["guest_name"].ne("")
-        & ~df["guest_name"].str.lower().isin(["guest_name", "nome ospite"])
-        & check_in_dt.notna()
-        & check_out_dt.notna()
-        & (check_out_dt > check_in_dt)
-    )
-
-    df = df[valid_mask].copy()
-    check_in_dt = check_in_dt[valid_mask]
-    check_out_dt = check_out_dt[valid_mask]
-
-    if df.empty:
-        return pd.DataFrame(columns=[
-            "id", "platform", "guest_name", "guest_phone", "check_in", "check_out",
-            "total_price", "cleaning_cost", "platform_fee", "transaction_cost",
-            "raw_booking_status", "status", "guests", "notes"
-        ])
-
-    df["check_in"] = check_in_dt.dt.date
-    df["check_out"] = check_out_dt.dt.date
-
-    for col in ["total_price", "cleaning_cost", "platform_fee", "transaction_cost", "guests"]:
-        if col not in df.columns:
-            df[col] = 0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    df["guests"] = df["guests"].astype(int).clip(lower=1)
-
-    if "status" not in df.columns:
-        df["status"] = "confirmed"
-    df["status"] = df["status"].fillna("confirmed").astype(str).apply(normalize_status)
-
-    if "raw_booking_status" not in df.columns:
-        df["raw_booking_status"] = df["status"]
-    df["raw_booking_status"] = df["raw_booking_status"].fillna(df["status"]).astype(str)
-
-    if "notes" not in df.columns:
-        df["notes"] = ""
-    df["notes"] = df["notes"].fillna("").astype(str)
-
-    return df.reset_index(drop=True)
-
 
 def merge_booking_sources(base_df, custom_df):
     base = ensure_booking_dataframe_columns(base_df) if base_df is not None else pd.DataFrame()
@@ -2206,12 +2380,13 @@ def inizializza_sessione():
         st.session_state.message_settings_loaded = False
     if "file_prenotazioni_signature" not in st.session_state:
         st.session_state.file_prenotazioni_signature = None
+    if "backend_reservations_refresh_nonce" not in st.session_state:
+        st.session_state.backend_reservations_refresh_nonce = 0
+    if "backend_custom_bookings_refresh_nonce" not in st.session_state:
+        st.session_state.backend_custom_bookings_refresh_nonce = 0
 
 
 def logout():
-    token = st.session_state.get("auth_token")
-    elimina_sessione_accesso(token)
-
     st.session_state.utente = None
     st.session_state.auth_token = None
     st.session_state.profilo_immobile = None
@@ -2254,6 +2429,11 @@ div[data-testid="stMetric"] {{
 .block-container {{
     padding-top:18px 0 18px 0;
 }}
+
+/* Riduce l'impatto visivo dei micro-rerun Streamlit. */
+
+
+
 .hf-auth-box, .hf-onboarding-box {{
     max-width: 920px;
     margin: 0 auto 1.5rem auto;
@@ -3126,7 +3306,7 @@ def render_message_from_type(message_type, guest_name, check_in, check_out, prof
 
 def build_scheduled_messages_for_booking(row, profilo, scheduling_rules=None, template_base=None):
     guest_name = str(row.get("guest_name", "") or "").strip() or "Ospite"
-    guest_phone = str(row.get("guest_phone", "") or "").strip()
+    guest_phone = normalize_whatsapp_phone(row.get("guest_phone", ""))
     platform = str(row.get("platform", "") or "").strip() or "Booking"
     check_in = pd.to_datetime(row.get("check_in")).to_pydatetime()
     check_out = pd.to_datetime(row.get("check_out")).to_pydatetime()
@@ -3580,7 +3760,7 @@ def resolve_message_guest_phone(current_msg, bookings_df):
     if not current_msg:
         return ""
 
-    existing_phone = str(current_msg.get("guest_phone", "") or "").strip()
+    existing_phone = normalize_whatsapp_phone(current_msg.get("guest_phone", ""))
     if existing_phone:
         return existing_phone
 
@@ -3595,7 +3775,7 @@ def resolve_message_guest_phone(current_msg, bookings_df):
     if booking_ref_value and "booking_ref_calc" in bookings_df.columns:
         match_ref = bookings_df[bookings_df["booking_ref_calc"].astype(str) == booking_ref_value]
         if not match_ref.empty:
-            return str(match_ref.iloc[0].get("guest_phone", "") or "").strip()
+            return normalize_whatsapp_phone(match_ref.iloc[0].get("guest_phone", ""))
 
     guest_name = str(current_msg.get("guest_name", "") or "").strip()
     check_in = str(current_msg.get("check_in", "") or "").strip()
@@ -3607,7 +3787,7 @@ def resolve_message_guest_phone(current_msg, bookings_df):
         & (bookings_df["check_out"].astype(str) == check_out)
     ]
     if not fallback_match.empty:
-        return str(fallback_match.iloc[0].get("guest_phone", "") or "").strip()
+        return normalize_whatsapp_phone(fallback_match.iloc[0].get("guest_phone", ""))
 
     return ""
 
@@ -4264,16 +4444,15 @@ def render_auth():
                 elif not password:
                     st.error(TESTI["errore_password_vuota"])
                 else:
-                    utente = autentica_utente(email, password)
-                    if utente:
-                        token = crea_sessione_accesso(utente["id"])
-                        st.session_state.utente = utente
-                        st.session_state.auth_token = token
-                        st.session_state.profilo_immobile = carica_profilo_immobile(utente["id"])
-                        st.query_params["session"] = token
+                    ok, data, errore = backend_login(email, password)
+                    if ok:
+                        token = data["access_token"]
+                        backend_user = data.get("user", {})
+                        set_authenticated_user_from_backend(token, backend_user)
+                        st.query_params["token"] = token
                         st.rerun()
                     else:
-                        st.error(TESTI["errore_login"])
+                        st.error(errore or TESTI["errore_login"])
 
     with tab_reg:
         with st.form("register_form"):
@@ -4291,11 +4470,11 @@ def render_auth():
                 elif password != password2:
                     st.error(TESTI["errore_password_diverse"])
                 else:
-                    ok, errore = crea_utente(email, password)
+                    ok, data, errore = backend_register(email, password)
                     if ok:
                         st.success(TESTI["messaggio_registrazione_ok"])
                     else:
-                        st.error(errore)
+                        st.error(errore or TESTI["errore_email_esistente"])
 
     with tab_reset:
         if smtp_config_disponibile():
@@ -4493,18 +4672,7 @@ init_db()
 inizializza_sessione()
 
 if st.session_state.utente is None:
-    token_qs = st.query_params.get("session")
-    if token_qs:
-        auth_data = autentica_da_token(token_qs)
-        if auth_data:
-            st.session_state.utente = {"id": auth_data["id"], "email": auth_data["email"]}
-            st.session_state.auth_token = auth_data["token"]
-            st.session_state.profilo_immobile = carica_profilo_immobile(auth_data["id"])
-        else:
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
+    try_authenticate_from_backend_token()
 
 if st.session_state.utente is None:
     render_auth()
@@ -4518,13 +4686,15 @@ st.session_state.cleaning_cost_default = 0.0
 st.session_state.monthly_cleaning_cost = 0.0
 
 if st.session_state.get("auth_token"):
-    st.query_params["session"] = st.session_state["auth_token"]
+    current_url_token = get_query_param_value("token")
+    if current_url_token != st.session_state["auth_token"]:
+        try:
+            st.query_params["token"] = st.session_state["auth_token"]
+        except Exception:
+            pass
 
-if st.session_state.get("file_prenotazioni_virtuale") is None:
-    file_salvato = carica_file_prenotazioni(st.session_state.utente["id"])
-    if file_salvato is not None:
-        st.session_state.file_prenotazioni_virtuale = file_salvato
-        st.session_state.file_prenotazioni_nome = getattr(file_salvato, "name", None)
+# Le prenotazioni importate vengono ora lette dal backend FastAPI/Postgres.
+# Manteniamo file_prenotazioni_virtuale solo per compatibilità temporanea, ma non ricarichiamo più il vecchio file locale.
 
 if not st.session_state.get("message_settings_loaded", False):
     saved_message_settings = load_message_settings(st.session_state.utente["id"])
@@ -4556,16 +4726,27 @@ with st.sidebar:
         ).hexdigest()
 
         if st.session_state.get("file_prenotazioni_signature") != uploaded_signature:
-            salva_file_prenotazioni(st.session_state.utente["id"], uploaded_file_widget)
             buffer_file = BytesIO(uploaded_bytes)
             buffer_file.name = uploaded_file_widget.name
             buffer_file.seek(0)
-            st.session_state.file_prenotazioni_virtuale = buffer_file
-            st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
-            st.session_state.file_prenotazioni_signature = uploaded_signature
-            st.rerun()
+
+            ok_upload, upload_message = backend_upload_reservations(
+                buffer_file,
+                st.session_state.get("auth_token"),
+            )
+            if ok_upload:
+                st.session_state.file_prenotazioni_signature = uploaded_signature
+                st.session_state.file_prenotazioni_nome = uploaded_file_widget.name
+                st.session_state.file_prenotazioni_virtuale = None
+                st.session_state.backend_reservations_refresh_nonce = int(st.session_state.get("backend_reservations_refresh_nonce", 0) or 0) + 1
+                st.session_state["backend_reservations_upload_ok"] = upload_message
+                st.rerun()
+            else:
+                st.error(upload_message)
 
     uploaded_file = st.session_state.get("file_prenotazioni_virtuale")
+    if st.session_state.get("backend_reservations_upload_ok"):
+        st.success(st.session_state.pop("backend_reservations_upload_ok"))
 
     with st.expander(TESTI["sidebar_pulizie_header"], expanded=False):
         cleaning_mode = st.radio(
@@ -4692,7 +4873,8 @@ with st.sidebar:
             )
 
     merged_sidebar_settings = carica_sidebar_settings(st.session_state.utente["id"])
-    merged_sidebar_settings.update({
+    new_sidebar_settings = dict(merged_sidebar_settings)
+    new_sidebar_settings.update({
         "import_mode": import_mode,
         "cleaning_mode": cleaning_mode,
         "cleaning_cost_default": float(cleaning_cost_default),
@@ -4712,7 +4894,8 @@ with st.sidebar:
         "custom_start_date": custom_start_date.isoformat() if hasattr(custom_start_date, "isoformat") else str(custom_start_date),
         "custom_end_date": custom_end_date.isoformat() if hasattr(custom_end_date, "isoformat") else str(custom_end_date),
     })
-    salva_sidebar_settings(st.session_state.utente["id"], merged_sidebar_settings)
+    if new_sidebar_settings != merged_sidebar_settings:
+        salva_sidebar_settings(st.session_state.utente["id"], new_sidebar_settings)
 
     st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
     if st.button("Logout", use_container_width=True, key="logout_sidebar_bottom"):
@@ -4743,13 +4926,15 @@ annual = None
 
 custom_bookings_df = load_custom_bookings(st.session_state.utente["id"])
 
-if uploaded_file or not custom_bookings_df.empty:
+try:
+    backend_reservations_df = backend_reservations_to_dataframe(st.session_state.get("auth_token"))
+except Exception as exc:
+    st.error(f"Errore caricamento prenotazioni dal backend: {exc}")
+    backend_reservations_df = ensure_booking_dataframe_columns(pd.DataFrame())
+
+if not backend_reservations_df.empty or not custom_bookings_df.empty:
     try:
-        raw_df = pd.DataFrame()
-        if uploaded_file:
-            if hasattr(uploaded_file, "seek"):
-                uploaded_file.seek(0)
-            raw_df = load_data(uploaded_file, cleaning_cost_default, import_mode)
+        raw_df = backend_reservations_df.copy()
 
         merged_raw_df = merge_booking_sources(raw_df, custom_bookings_df)
         df = enrich_financials(
@@ -5459,11 +5644,11 @@ if "messaggi" in tab_map:
                                     unsafe_allow_html=True,
                                 )
 
-                                resolved_guest_phone = resolve_message_guest_phone(current_msg, df)
+                                resolved_guest_phone = normalize_whatsapp_phone(resolve_message_guest_phone(current_msg, df))
 
                                 info1, info2 = st.columns(2)
                                 with info1:
-                                    st.text_input("Telefono", value=resolved_guest_phone, disabled=True, key=f"msg_phone_{selected_id}")
+                                    st.text_input("Telefono inviato a Meta", value=resolved_guest_phone, disabled=True, key=f"msg_phone_{selected_id}")
                                 with info2:
                                     st.text_input("Piattaforma", value=str(current_msg.get("platform", "") or ""), disabled=True, key=f"msg_platform_{selected_id}")
 
@@ -5482,7 +5667,7 @@ if "messaggi" in tab_map:
                                 status_value = str(current_msg.get("status", "pending"))
 
                                 def _send_selected_message_now():
-                                    phone_to_send = resolved_guest_phone or str(current_msg.get("guest_phone", "") or "").strip()
+                                    phone_to_send = normalize_whatsapp_phone(resolved_guest_phone or current_msg.get("guest_phone", ""))
                                     message_text_to_send = str(current_msg.get("message_text", "") or "").strip()
 
                                     if not phone_to_send:
@@ -5517,7 +5702,7 @@ if "messaggi" in tab_map:
                                             selected_id,
                                             st.session_state.utente["id"],
                                             "failed",
-                                            error_message=str(result),
+                                            error_message=json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result),
                                             set_sent_now=False,
                                         )
                                         st.error(f"Errore invio WhatsApp: {result}")
@@ -6082,3 +6267,24 @@ if "dati" in tab_map:
             if SEZIONI["mostra_colonne_calcolate"]:
                 st.subheader(TESTI["dati_colonne_titolo"])
                 st.write(["nights", "city_tax", "vat_platform_services", "transaction_cost", "cleaning_allocated", "withholding_tax", "net_operating", "net_real", "adr"])
+
+
+
+st.markdown("""
+<style>
+[data-testid="stStatusWidget"] {
+    visibility: hidden;
+    height: 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+
+st.markdown("""
+<style>
+.stDeployButton {
+    display: none;
+}
+</style>
+""", unsafe_allow_html=True)
