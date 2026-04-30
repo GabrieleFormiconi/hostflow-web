@@ -331,6 +331,7 @@ function MessagesTab({ token, property, rows }) {
   const [chatReply, setChatReply] = useState("");
   const [chatSending, setChatSending] = useState(false);
   const [chatMsg, setChatMsg] = useState("");
+  const chatFeedRef = useRef(null);
 
   useEffect(() => {
     setTemplates(readJson(STORAGE.templates, DEFAULT_TEMPLATES));
@@ -339,7 +340,17 @@ function MessagesTab({ token, property, rows }) {
     try { setStatusOverrides(JSON.parse(localStorage.getItem("hostflow_message_status_overrides_v1") || "{}")); } catch { setStatusOverrides({}); }
   }, []);
 
-  useEffect(() => { if (token) loadChat(); }, [token]);
+  useEffect(() => {
+    if (!token) return;
+
+    loadChat();
+
+    const interval = setInterval(() => {
+      loadChat();
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [token]);
 
   function updateTemplate(key, value) { setTemplates(prev => ({ ...prev, [key]: value })); }
   function saveTemplates() { writeJson(STORAGE.templates, templates); writeJson(STORAGE.schedules, schedules); setMsg("Template messaggi e orari salvati."); }
@@ -562,66 +573,80 @@ function MessagesTab({ token, property, rows }) {
   const selectedConversation = conversations.find(c => String(c.guest_phone) === String(selectedChatPhone)) || conversations[0];
   const selectedConversationMessages = visibleChatMessages(selectedConversation);
 
+  useEffect(() => {
+    if (!chatFeedRef.current) return;
+    chatFeedRef.current.scrollTop = chatFeedRef.current.scrollHeight;
+  }, [selectedChatPhone, selectedConversationMessages.length]);
+
   return <>
     <h2>Messaggi automatici</h2>
     <p className="hf-muted">I messaggi vengono generati dalle prenotazioni del periodo selezionato e dai dati salvati nella Scheda immobile.</p>
     <label className="hf-check hf-template-toggle"><input type="checkbox" checked={showTemplates} onChange={e => setShowTemplates(e.target.checked)} />Mostra template</label>
     {showTemplates && <div className="hf-form-box"><h3>Template messaggi</h3>{Object.entries(DEFAULT_SCHEDULES).map(([key, rule]) => <div key={key}><label>{rule.label}</label><textarea value={templates[key] || ""} onChange={e => updateTemplate(key, e.target.value)} /><div className="hf-grid-2"><label>Offset giorni<input type="number" value={schedules[key]?.offsetDays ?? 0} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], offsetDays: Number(e.target.value) } }))} /></label><label>Ora invio<input value={schedules[key]?.time || ""} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], time: e.target.value } }))} /></label></div></div>)}<button type="button" className="hf-primary-full" onClick={saveTemplates}>Salva template messaggi</button>{msg && <div className="hf-success">{msg}</div>}</div>}
     <h2>Messaggi programmati</h2>
-    <div className="hf-actions"><button type="button" onClick={syncScheduledMessages} disabled={syncingSchedule || !scheduledMessages.length}>{syncingSchedule ? "Sincronizzo..." : "Genera / aggiorna messaggi programmati"}</button></div>
+    <p className="hf-muted">I messaggi programmati vengono aggiornati automaticamente dalle prenotazioni e dai template salvati.</p>
     <div className="hf-metrics"><Metric label="Da inviare" value={pendingCount} /><Metric label="Inviati" value={sentCount} /><Metric label="Falliti" value={failedCount} /><Metric label="Annullati" value={cancelledCount} /></div>
     <div className="hf-messages-layout"><div><h2>Prossimi messaggi</h2><p className="hf-muted">Lista essenziale, ordinata per soggiorno e data di invio.</p>{scheduledMessages.length ? <div className="hf-message-list">{scheduledMessages.map((m, index) => <button type="button" key={m.id} className={`hf-message-item status-${m.status} ${selected?.id === m.id ? "active" : ""} ${m.status === "cancelled" ? "cancelled" : ""}`} onClick={() => setSelectedId(m.id)}><span className="hf-message-dot">{selected?.id === m.id ? "●" : "○"}</span><span>#{index + 1} · {m.row.guest_name || "Ospite"} · {m.row.guest_phone} · {m.label} · {formatItalianDate(m.sendDate)}</span><small>{m.sendTime}</small></button>)}</div> : <div className="hf-info">Nessun messaggio programmato. Verranno mostrati solo ospiti con telefono e prenotazioni correnti o future.</div>}</div><div><h2>Dettaglio messaggio</h2>{selected ? <><div className={`hf-message-card ${selected.status === "cancelled" ? "cancelled" : ""}`}><div className={`hf-status-pill status-${selected.status}`}>{selected.status === "cancelled" ? "Annullato" : selected.status === "sent" ? "Inviato" : selected.status === "failed" ? "Fallito" : "In attesa di invio"}</div><h3>{selected.row.guest_name || "Ospite"}</h3><p>{selected.label} · whatsapp · Invio previsto: {formatItalianDate(selected.sendDate)} {selected.sendTime}</p></div><div className="hf-grid-2"><label>Telefono<input value={selected.row.guest_phone || ""} readOnly /></label><label>Piattaforma<input value={selected.row.platform || ""} readOnly /></label></div><label>Anteprima messaggio</label><textarea value={selected.text} readOnly className="hf-message-preview" />{selected.error_message && <div className="hf-info">Errore ultimo invio: {selected.error_message}</div>}<div className="hf-info">WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.</div><div className="hf-actions"><button type="button" disabled={sending} onClick={sendSelected}>{sending ? "Invio..." : "Invia WhatsApp ora"}</button>{selected.status === "cancelled" ? <button type="button" onClick={restoreSelected}>Ripristina</button> : <button type="button" onClick={cancelSelected}>Annulla</button>}</div>{actionMsg && <div className={actionMsg.toLowerCase().includes("fall") || actionMsg.toLowerCase().includes("erro") ? "hf-info" : "hf-success"}>{actionMsg}</div>}</> : <div className="hf-info">Seleziona un messaggio dalla lista.</div>}</div></div>
 
     <h2>Inbox WhatsApp</h2>
-    <div className="hf-actions"><button type="button" onClick={loadChat} disabled={chatLoading}>{chatLoading ? "Aggiorno..." : "Aggiorna chat"}</button></div>
-    <div className="hf-messages-layout">
-      <div>
-        <h2>Conversazioni</h2>
-        {conversations.length ? <div className="hf-message-list">
+    <p className="hf-muted">La chat si aggiorna automaticamente. Seleziona una conversazione a sinistra e rispondi dal box a destra.</p>
+    <div className="hf-whatsapp-web-layout">
+      <div className="hf-wa-sidebar">
+        <div className="hf-wa-sidebar-header">
+          <h2>Conversazioni</h2>
+          {chatLoading && <small>Aggiornamento...</small>}
+        </div>
+        {conversations.length ? <div className="hf-wa-conversation-list">
           {conversations.map((c) => {
             const messages = visibleChatMessages(c);
             const lastVisible = messages[messages.length - 1]?.message_text || c.last_message || "";
-            return <button type="button" key={c.guest_phone} className={`hf-message-item ${selectedConversation?.guest_phone === c.guest_phone ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}>
-              <span className="hf-message-dot">{selectedConversation?.guest_phone === c.guest_phone ? "●" : "○"}</span>
-              <span>{c.guest_name || "Ospite"} · {c.guest_phone}</span>
-              <small>{lastVisible}</small>
+            const lastAt = messages[messages.length - 1]?.created_at || c.last_at || "";
+            return <button type="button" key={c.guest_phone} className={`hf-wa-conversation ${selectedConversation?.guest_phone === c.guest_phone ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}>
+              <div className="hf-wa-avatar">{String(c.guest_name || "O").slice(0, 1).toUpperCase()}</div>
+              <div className="hf-wa-conversation-main">
+                <div className="hf-wa-conversation-top">
+                  <strong>{c.guest_name || "Ospite"}</strong>
+                  <small>{lastAt ? new Date(lastAt).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }) : ""}</small>
+                </div>
+                <div className="hf-wa-conversation-bottom">{lastVisible || "Nessun messaggio"}</div>
+              </div>
             </button>;
           })}
-        </div> : <div className="hf-info">Nessuna risposta ancora ricevuta. Scrivi dal telefono al numero test Meta, poi premi “Aggiorna chat”.</div>}
+        </div> : <div className="hf-info">Nessuna risposta ancora ricevuta. Scrivi dal telefono al numero test Meta: comparirà qui automaticamente.</div>}
       </div>
-      <div>
-        <h2>Chat</h2>
-        {selectedConversation ? <div className="hf-whatsapp-panel">
-          <div className="hf-whatsapp-header">
-            <strong>{selectedConversation.guest_name || "Ospite"}</strong>
-            <span>{selectedConversation.guest_phone}</span>
+
+      <div className="hf-wa-chat">
+        {selectedConversation ? <>
+          <div className="hf-wa-chat-header">
+            <div className="hf-wa-avatar">{String(selectedConversation.guest_name || "O").slice(0, 1).toUpperCase()}</div>
+            <div>
+              <strong>{selectedConversation.guest_name || "Ospite"}</strong>
+              <span>{selectedConversation.guest_phone}</span>
+            </div>
           </div>
-          <div className="hf-whatsapp-feed">
+
+          <div className="hf-wa-feed" ref={chatFeedRef}>
             {selectedConversationMessages.length ? selectedConversationMessages.map((m) => {
               const inbound = String(m.direction || "").toLowerCase() !== "outbound";
-              const bubbleStyle = {
-                maxWidth: "78%",
-                margin: inbound ? "8px auto 8px 0" : "8px 0 8px auto",
-                padding: "10px 12px",
-                borderRadius: inbound ? "14px 14px 14px 4px" : "14px 14px 4px 14px",
-                background: inbound ? "#202c33" : "#005c4b",
-                border: "1px solid rgba(255,255,255,.08)",
-                whiteSpace: "pre-wrap",
-              };
-              return <div key={m.id || `${m.created_at}-${m.message_text}`} style={bubbleStyle}>
-                <div style={{ fontSize: 12, opacity: .75, marginBottom: 4 }}>{inbound ? "Ospite" : "HostFlow"}</div>
-                <div>{m.message_text}</div>
-                <div style={{ fontSize: 11, opacity: .65, textAlign: "right", marginTop: 6 }}>{m.created_at ? new Date(m.created_at).toLocaleString("it-IT") : ""}</div>
+              return <div key={m.id || `${m.created_at}-${m.message_text}`} className={`hf-wa-bubble ${inbound ? "inbound" : "outbound"}`}>
+                <div className="hf-wa-bubble-author">{inbound ? (selectedConversation.guest_name || "Ospite") : "HostFlow"}</div>
+                <div className="hf-wa-bubble-text">{m.message_text}</div>
+                <div className="hf-wa-bubble-time">{m.created_at ? new Date(m.created_at).toLocaleString("it-IT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""}</div>
               </div>;
-            }) : <div className="hf-info">Nessun messaggio visibile in questa conversazione. I vecchi invii falliti sono stati nascosti.</div>}
+            }) : <div className="hf-info">Nessun messaggio visibile in questa conversazione.</div>}
           </div>
-          <div className="hf-whatsapp-reply">
-            <label>Rispondi dal numero business</label>
-            <textarea value={chatReply} onChange={e => setChatReply(e.target.value)} placeholder="Scrivi una risposta WhatsApp..." />
-            <button type="button" className="hf-primary-full" onClick={sendChatReply} disabled={chatSending || !chatReply.trim()}>{chatSending ? "Invio..." : "Invia risposta WhatsApp"}</button>
-            {chatMsg && <div className={chatMsg.toLowerCase().includes("erro") || chatMsg.toLowerCase().includes("fall") ? "hf-info" : "hf-success"}>{chatMsg}</div>}
+
+          <div className="hf-wa-reply">
+            <textarea value={chatReply} onChange={e => setChatReply(e.target.value)} placeholder="Scrivi un messaggio..." onKeyDown={e => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendChatReply();
+              }
+            }} />
+            <button type="button" onClick={sendChatReply} disabled={chatSending || !chatReply.trim()}>{chatSending ? "Invio..." : "Invia"}</button>
           </div>
-        </div> : <div className="hf-info">Seleziona una conversazione.</div>}
+          {chatMsg && <div className={chatMsg.toLowerCase().includes("erro") || chatMsg.toLowerCase().includes("fall") ? "hf-info" : "hf-success"}>{chatMsg}</div>}
+        </> : <div className="hf-info">Seleziona una conversazione.</div>}
       </div>
     </div>
   </>;
