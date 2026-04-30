@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://hostflow-backend.onrender.com";
@@ -339,17 +339,7 @@ function MessagesTab({ token, property, rows }) {
     try { setStatusOverrides(JSON.parse(localStorage.getItem("hostflow_message_status_overrides_v1") || "{}")); } catch { setStatusOverrides({}); }
   }, []);
 
-  useEffect(() => {
-    if (!token) return;
-
-    loadChat();
-
-    const interval = setInterval(() => {
-      loadChat();
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [token]);
+  useEffect(() => { if (token) loadChat(); }, [token]);
 
   function updateTemplate(key, value) { setTemplates(prev => ({ ...prev, [key]: value })); }
   function saveTemplates() { writeJson(STORAGE.templates, templates); writeJson(STORAGE.schedules, schedules); setMsg("Template messaggi e orari salvati."); }
@@ -814,7 +804,7 @@ function PulizieTab({ settings, rows, services, setServices }) {
 }
 function DatiTab({ rows }) { function downloadCsv() { const cols = TABLE_COLS; const csv = [cols.join(","), ...rows.map(r => cols.map(c => JSON.stringify(r[c] ?? "")).join(","))].join("\n"); const blob = new Blob([csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "hostflow_export.csv"; a.click(); URL.revokeObjectURL(url); } return <><h2>Scarica CSV elaborato</h2><button type="button" className="hf-primary-full" onClick={downloadCsv}>Scarica CSV</button><h2>Colonne calcolate</h2><div className="hf-table-wrap"><table><tbody>{TABLE_COLS.map(c => <tr key={c}><td>{c}</td></tr>)}</tbody></table></div></>; }
 
-export default function DashboardPage() {
+function DashboardPageContent() {
   const router = useRouter(); const searchParams = useSearchParams(); const [token, setToken] = useState(""); const [user, setUser] = useState(null); const [tab, setTab] = useState("Dashboard"); const [refreshKey, setRefreshKey] = useState(0); const [sidebarWidth, setSidebarWidth] = useState(370); const [baseRows, setBaseRows] = useState([]); const [customRows, setCustomRows] = useState([]); const [optimisticCustomRows, setOptimisticCustomRows] = useState([]); const [settings, setSettings] = useState(DEFAULT_SETTINGS); const [property, setProperty] = useState(DEFAULT_PROPERTY); const [cleaningServices, setCleaningServices] = useState([]); const [sidebarCollapsed, setSidebarCollapsed] = useState(false); const [onboarding, setOnboarding] = useState(false);
   useEffect(() => { const t = localStorage.getItem("hostflow_token"); const u = localStorage.getItem("hostflow_user"); if (!t) { router.push("/"); return; } setToken(t); if (u) setUser(JSON.parse(u)); setSettings(readJson(STORAGE.settings, DEFAULT_SETTINGS)); setProperty(readJson(STORAGE.property, DEFAULT_PROPERTY)); setCleaningServices(readArray(STORAGE.cleaningServices)); setSidebarCollapsed(localStorage.getItem(STORAGE.sidebar) === "1"); const needs = localStorage.getItem("hostflow_needs_onboarding") === "1" || searchParams.get("onboarding") === "1"; setOnboarding(needs); if (needs) setTab("Immobile"); }, [router, searchParams]);
   useEffect(() => { if (token) writeJson(STORAGE.settings, settings); }, [settings, token]);
@@ -824,4 +814,12 @@ export default function DashboardPage() {
   const mergedCustomRows = useMemo(() => mergeCustomRows(customRows, optimisticCustomRows), [customRows, optimisticCustomRows]); const rawRows = useMemo(() => [...baseRows, ...mergedCustomRows], [baseRows, mergedCustomRows]); const enrichedRows = useMemo(() => rawRows.map(r => enrichRow(r, settings, rawRows, cleaningServices)), [rawRows, settings, cleaningServices]); const filteredRows = useMemo(() => enrichedRows.filter(r => rowInPeriod(r, settings)), [enrichedRows, settings]); const [, , periodLabel] = periodRange(settings);
   if (!token) return <main className="hf-loading">Caricamento...</main>;
   return <main className={`hf-app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}><Sidebar token={token} settings={settings} setSettings={setSettings} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} sidebarWidth={sidebarWidth} setSidebarWidth={setSidebarWidth} onLogout={logout} onUploaded={() => setRefreshKey(x => x + 1)} /><section className="hf-main"><header><div><h1>HostFlow v5</h1><p>Dashboard host con import Booking, netto reale, immobile, analisi mercato e pricing regolabile</p></div></header><nav className="hf-tabs">{MAIN_TABS.map(t => <button type="button" key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>)}</nav>{tab === "Dashboard" && <DashboardTab token={token} rows={filteredRows} allRows={enrichedRows} customRows={mergedCustomRows} refresh={() => setRefreshKey(x => x + 1)} settings={settings} periodLabel={periodLabel} onCustomCreated={(row) => setOptimisticCustomRows(prev => mergeCustomRows(prev, [row]))} />}{tab === "Immobile" && <ImmobileTab property={property} setProperty={setProperty} onboarding={onboarding} setOnboarding={setOnboarding} />}{tab === "Analisi mercato" && <MarketTab property={property} />}{tab === "Pricing" && <PricingTab rows={filteredRows} settings={settings} />}{tab === "Messaggi" && <MessagesTab token={token} property={property} rows={filteredRows} />}{tab === "Pulizie" && <PulizieTab settings={settings} rows={filteredRows} services={cleaningServices} setServices={setCleaningServices} />}{tab === "Dati" && <DatiTab rows={filteredRows} />}</section></main>;
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={<main className="hf-loading">Caricamento...</main>}>
+      <DashboardPageContent />
+    </Suspense>
+  );
 }
