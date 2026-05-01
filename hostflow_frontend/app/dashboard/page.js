@@ -223,6 +223,27 @@ function mergeCustomRows(serverRows, optimisticRows) {
   return out;
 }
 
+function extractReservationArray(data) {
+  if (!data || typeof data !== "object") return [];
+  const keys = [
+    "reservations",
+    "custom_bookings",
+    "custom_reservations",
+    "bookings",
+    "items",
+    "data",
+    "rows",
+  ];
+
+  for (const key of keys) {
+    if (Array.isArray(data[key])) return data[key];
+  }
+
+  if (Array.isArray(data)) return data;
+  return [];
+}
+
+
 function Metric({ label, value }) { return <div className="hf-metric"><div>{label}</div><strong>{value}</strong></div>; }
 function Expander({ title, children, defaultOpen = false }) { const [open, setOpen] = useState(defaultOpen); return <div className={`hf-expander ${open ? "open" : ""}`}><button type="button" className="hf-expander-title" onClick={() => setOpen(!open)}><span>{open ? "−" : "+"}</span>{title}</button>{open && <div className="hf-expander-content">{children}</div>}</div>; }
 function SidebarSection({ title, children }) { const [open, setOpen] = useState(false); return <div className={`hf-sidebar-section ${open ? "open" : ""}`}><button type="button" className="hf-sidebar-section-title" onClick={() => setOpen(v => !v)}><span>{open ? "−" : "+"}</span>{title}</button>{open && <div className="hf-sidebar-section-content">{children}</div>}</div>; }
@@ -286,14 +307,33 @@ function DashboardTab({ token, rows, allRows, customRows, refresh, settings, per
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.message || "Errore salvataggio.");
 
-      const returned = data.custom_booking || data.booking || data.reservation || data.custom || null;
+      const returned =
+        data.custom_booking ||
+        data.custom_reservation ||
+        data.booking ||
+        data.reservation ||
+        data.custom ||
+        data.item ||
+        data.data ||
+        null;
+
       const created = normalize({
         ...payload,
-        ...(returned || {}),
-        id: returned?.id || data.id || data.booking_id || data.custom_booking_id || `local-${Date.now()}`,
-        status: returned?.status || payload.status || "confirmed",
+        ...(returned && typeof returned === "object" ? returned : {}),
+        id:
+          returned?.id ||
+          data.id ||
+          data.booking_id ||
+          data.reservation_id ||
+          data.custom_booking_id ||
+          data.custom_reservation_id ||
+          `local-${Date.now()}`,
+        status: returned?.status || returned?.raw_booking_status || payload.status || "confirmed",
       }, "Custom");
+
       if (onCustomCreated) onCustomCreated(created);
+      setEditId(String(created.id));
+      setEdit(created);
 
       setCreateMsg("Prenotazione custom salvata correttamente.");
       setForm({ guest_name: "", guest_phone: "", check_in: periodDefaultDates.check_in, check_out: periodDefaultDates.check_out, guests: 2, total_price: 0, cleaning_cost: 0, status: "confirmed", notes: "" });
@@ -590,7 +630,7 @@ function MessagesTab({ token, property, rows }) {
     <label className="hf-check hf-template-toggle"><input type="checkbox" checked={showTemplates} onChange={e => setShowTemplates(e.target.checked)} />Mostra template</label>
     {showTemplates && <div className="hf-form-box"><h3>Template messaggi</h3>{Object.entries(DEFAULT_SCHEDULES).map(([key, rule]) => <div key={key}><label>{rule.label}</label><textarea value={templates[key] || ""} onChange={e => updateTemplate(key, e.target.value)} /><div className="hf-grid-2"><label>Offset giorni<input type="number" value={schedules[key]?.offsetDays ?? 0} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], offsetDays: Number(e.target.value) } }))} /></label><label>Ora invio<input value={schedules[key]?.time || ""} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], time: e.target.value } }))} /></label></div></div>)}<button type="button" className="hf-primary-full" onClick={saveTemplates}>Salva template messaggi</button>{msg && <div className="hf-success">{msg}</div>}</div>}
     <h2>Messaggi programmati</h2>
-    <div className="hf-actions"><button type="button" onClick={syncScheduledMessages} disabled={syncingSchedule || !scheduledMessages.length}>{syncingSchedule ? "Sincronizzo..." : "Genera / aggiorna messaggi programmati"}</button></div>
+    <p className="hf-muted">I messaggi programmati vengono aggiornati automaticamente dalle prenotazioni e dai template salvati.</p>
     <div className="hf-metrics"><Metric label="Da inviare" value={pendingCount} /><Metric label="Inviati" value={sentCount} /><Metric label="Falliti" value={failedCount} /><Metric label="Annullati" value={cancelledCount} /></div>
     <div className="hf-messages-layout"><div><h2>Prossimi messaggi</h2><p className="hf-muted">Lista essenziale, ordinata per soggiorno e data di invio.</p>{scheduledMessages.length ? <div className="hf-message-list">{scheduledMessages.map((m, index) => <button type="button" key={m.id} className={`hf-message-item status-${m.status} ${selected?.id === m.id ? "active" : ""} ${m.status === "cancelled" ? "cancelled" : ""}`} onClick={() => setSelectedId(m.id)}><span className="hf-message-dot">{selected?.id === m.id ? "●" : "○"}</span><span>#{index + 1} · {m.row.guest_name || "Ospite"} · {m.row.guest_phone} · {m.label} · {formatItalianDate(m.sendDate)}</span><small>{m.sendTime}</small></button>)}</div> : <div className="hf-info">Nessun messaggio programmato. Verranno mostrati solo ospiti con telefono e prenotazioni correnti o future.</div>}</div><div><h2>Dettaglio messaggio</h2>{selected ? <><div className={`hf-message-card ${selected.status === "cancelled" ? "cancelled" : ""}`}><div className={`hf-status-pill status-${selected.status}`}>{selected.status === "cancelled" ? "Annullato" : selected.status === "sent" ? "Inviato" : selected.status === "failed" ? "Fallito" : "In attesa di invio"}</div><h3>{selected.row.guest_name || "Ospite"}</h3><p>{selected.label} · whatsapp · Invio previsto: {formatItalianDate(selected.sendDate)} {selected.sendTime}</p></div><div className="hf-grid-2"><label>Telefono<input value={selected.row.guest_phone || ""} readOnly /></label><label>Piattaforma<input value={selected.row.platform || ""} readOnly /></label></div><label>Anteprima messaggio</label><textarea value={selected.text} readOnly className="hf-message-preview" />{selected.error_message && <div className="hf-info">Errore ultimo invio: {selected.error_message}</div>}<div className="hf-info">WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.</div><div className="hf-actions"><button type="button" disabled={sending} onClick={sendSelected}>{sending ? "Invio..." : "Invia WhatsApp ora"}</button>{selected.status === "cancelled" ? <button type="button" onClick={restoreSelected}>Ripristina</button> : <button type="button" onClick={cancelSelected}>Annulla</button>}</div>{actionMsg && <div className={actionMsg.toLowerCase().includes("fall") || actionMsg.toLowerCase().includes("erro") ? "hf-info" : "hf-success"}>{actionMsg}</div>}</> : <div className="hf-info">Seleziona un messaggio dalla lista.</div>}</div></div>
 
@@ -880,7 +920,21 @@ function DashboardPageContent() {
   useEffect(() => { const t = localStorage.getItem("hostflow_token"); const u = localStorage.getItem("hostflow_user"); if (!t) { router.push("/"); return; } setToken(t); if (u) setUser(JSON.parse(u)); setSettings(readJson(STORAGE.settings, DEFAULT_SETTINGS)); setProperty(readJson(STORAGE.property, DEFAULT_PROPERTY)); setCleaningServices(readArray(STORAGE.cleaningServices)); setSidebarCollapsed(localStorage.getItem(STORAGE.sidebar) === "1"); const needs = localStorage.getItem("hostflow_needs_onboarding") === "1" || searchParams.get("onboarding") === "1"; setOnboarding(needs); if (needs) setTab("Immobile"); }, [router, searchParams]);
   useEffect(() => { if (token) writeJson(STORAGE.settings, settings); }, [settings, token]);
   useEffect(() => { localStorage.setItem(STORAGE.sidebar, sidebarCollapsed ? "1" : "0"); }, [sidebarCollapsed]);
-  useEffect(() => { if (!token) return; Promise.all([fetch(`${API_URL}/reservations`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()).catch(() => ({})), fetch(`${API_URL}/reservations/custom`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()).catch(() => ({}))]).then(([a, b]) => { setBaseRows(Array.isArray(a.reservations) ? a.reservations.map(r => normalize(r)) : []); setCustomRows(Array.isArray(b.custom_bookings) ? b.custom_bookings.map(r => normalize(r, "Custom")) : Array.isArray(b.reservations) ? b.reservations.map(r => normalize(r, "Custom")) : []); }); }, [token, refreshKey]);
+  useEffect(() => {
+    if (!token) return;
+
+    Promise.all([
+      fetch(`${API_URL}/reservations`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .catch(() => ({})),
+      fetch(`${API_URL}/reservations/custom`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .catch(() => ({})),
+    ]).then(([a, b]) => {
+      setBaseRows(extractReservationArray(a).map(r => normalize(r)));
+      setCustomRows(extractReservationArray(b).map(r => normalize(r, "Custom")));
+    });
+  }, [token, refreshKey]);
   function logout() { localStorage.removeItem("hostflow_token"); localStorage.removeItem("hostflow_user"); router.push("/"); }
   const mergedCustomRows = useMemo(() => mergeCustomRows(customRows, optimisticCustomRows), [customRows, optimisticCustomRows]); const rawRows = useMemo(() => [...baseRows, ...mergedCustomRows], [baseRows, mergedCustomRows]); const enrichedRows = useMemo(() => rawRows.map(r => enrichRow(r, settings, rawRows, cleaningServices)), [rawRows, settings, cleaningServices]); const filteredRows = useMemo(() => enrichedRows.filter(r => rowInPeriod(r, settings)), [enrichedRows, settings]); const [, , periodLabel] = periodRange(settings);
   if (!token) return <main className="hf-loading">Caricamento...</main>;
