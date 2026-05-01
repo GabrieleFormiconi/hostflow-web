@@ -595,56 +595,105 @@ function MessagesTab({ token, property, rows }) {
     <div className="hf-messages-layout"><div><h2>Prossimi messaggi</h2><p className="hf-muted">Lista essenziale, ordinata per soggiorno e data di invio.</p>{scheduledMessages.length ? <div className="hf-message-list">{scheduledMessages.map((m, index) => <button type="button" key={m.id} className={`hf-message-item status-${m.status} ${selected?.id === m.id ? "active" : ""} ${m.status === "cancelled" ? "cancelled" : ""}`} onClick={() => setSelectedId(m.id)}><span className="hf-message-dot">{selected?.id === m.id ? "●" : "○"}</span><span>#{index + 1} · {m.row.guest_name || "Ospite"} · {m.row.guest_phone} · {m.label} · {formatItalianDate(m.sendDate)}</span><small>{m.sendTime}</small></button>)}</div> : <div className="hf-info">Nessun messaggio programmato. Verranno mostrati solo ospiti con telefono e prenotazioni correnti o future.</div>}</div><div><h2>Dettaglio messaggio</h2>{selected ? <><div className={`hf-message-card ${selected.status === "cancelled" ? "cancelled" : ""}`}><div className={`hf-status-pill status-${selected.status}`}>{selected.status === "cancelled" ? "Annullato" : selected.status === "sent" ? "Inviato" : selected.status === "failed" ? "Fallito" : "In attesa di invio"}</div><h3>{selected.row.guest_name || "Ospite"}</h3><p>{selected.label} · whatsapp · Invio previsto: {formatItalianDate(selected.sendDate)} {selected.sendTime}</p></div><div className="hf-grid-2"><label>Telefono<input value={selected.row.guest_phone || ""} readOnly /></label><label>Piattaforma<input value={selected.row.platform || ""} readOnly /></label></div><label>Anteprima messaggio</label><textarea value={selected.text} readOnly className="hf-message-preview" />{selected.error_message && <div className="hf-info">Errore ultimo invio: {selected.error_message}</div>}<div className="hf-info">WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.</div><div className="hf-actions"><button type="button" disabled={sending} onClick={sendSelected}>{sending ? "Invio..." : "Invia WhatsApp ora"}</button>{selected.status === "cancelled" ? <button type="button" onClick={restoreSelected}>Ripristina</button> : <button type="button" onClick={cancelSelected}>Annulla</button>}</div>{actionMsg && <div className={actionMsg.toLowerCase().includes("fall") || actionMsg.toLowerCase().includes("erro") ? "hf-info" : "hf-success"}>{actionMsg}</div>}</> : <div className="hf-info">Seleziona un messaggio dalla lista.</div>}</div></div>
 
     <h2>Inbox WhatsApp</h2>
-    <div className="hf-actions"><button type="button" onClick={loadChat} disabled={chatLoading}>{chatLoading ? "Aggiorno..." : "Aggiorna chat"}</button></div>
-    <div className="hf-messages-layout">
-      <div>
-        <h2>Conversazioni</h2>
-        {conversations.length ? <div className="hf-message-list">
-          {conversations.map((c) => {
-            const messages = visibleChatMessages(c);
-            const lastVisible = messages[messages.length - 1]?.message_text || c.last_message || "";
-            return <button type="button" key={c.guest_phone} className={`hf-message-item ${selectedConversation?.guest_phone === c.guest_phone ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}>
-              <span className="hf-message-dot">{selectedConversation?.guest_phone === c.guest_phone ? "●" : "○"}</span>
-              <span>{c.guest_name || "Ospite"} · {c.guest_phone}</span>
-              <small>{lastVisible}</small>
-            </button>;
-          })}
-        </div> : <div className="hf-info">Nessuna risposta ancora ricevuta. Scrivi dal telefono al numero test Meta, poi premi “Aggiorna chat”.</div>}
-      </div>
-      <div>
-        <h2>Chat</h2>
-        {selectedConversation ? <div className="hf-whatsapp-panel">
-          <div className="hf-whatsapp-header">
-            <strong>{selectedConversation.guest_name || "Ospite"}</strong>
-            <span>{selectedConversation.guest_phone}</span>
+    <p className="hf-muted">Seleziona un cliente a sinistra e gestisci la conversazione a destra.</p>
+
+    <div className="hf-wa-shell">
+      <aside className="hf-wa-left">
+        <div className="hf-wa-left-head">
+          <div>
+            <h2>Chat</h2>
+            <span>{chatLoading ? "Aggiornamento..." : "Online"}</span>
           </div>
-          <div className="hf-whatsapp-feed">
+          <span className="hf-wa-menu">⋮</span>
+        </div>
+
+        <div className="hf-wa-search">
+          <span>⌕</span>
+          <input
+            value={chatSearch}
+            onChange={e => setChatSearch(e.target.value)}
+            placeholder="Cerca cliente"
+          />
+        </div>
+
+        <div className="hf-wa-list">
+          {filteredConversations.length ? filteredConversations.map((c) => {
+            const messages = visibleChatMessages(c);
+            const last = messages[messages.length - 1] || {};
+            const lastText = last.message_text || c.last_message || "";
+            const lastAt = last.created_at || c.last_at || "";
+            const active = selectedConversation?.guest_phone === c.guest_phone;
+
+            return (
+              <button
+                type="button"
+                key={c.guest_phone}
+                className={`hf-wa-client ${active ? "active" : ""}`}
+                onClick={() => setSelectedChatPhone(c.guest_phone)}
+              >
+                <div className="hf-wa-avatar">{String(c.guest_name || "O").slice(0, 1).toUpperCase()}</div>
+                <div className="hf-wa-client-body">
+                  <div className="hf-wa-client-top">
+                    <strong>{c.guest_name || "Ospite"}</strong>
+                    <small>{lastAt ? new Date(lastAt).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }) : ""}</small>
+                  </div>
+                  <div className="hf-wa-client-last">
+                    {String(last.direction || "").toLowerCase() === "outbound" ? "✓✓ " : ""}
+                    {lastText || "Nessun messaggio"}
+                  </div>
+                </div>
+              </button>
+            );
+          }) : <div className="hf-wa-empty">Nessuna conversazione trovata.</div>}
+        </div>
+      </aside>
+
+      <section className="hf-wa-chatbox">
+        {selectedConversation ? <>
+          <header className="hf-wa-chat-head">
+            <div className="hf-wa-avatar">{String(selectedConversation.guest_name || "O").slice(0, 1).toUpperCase()}</div>
+            <div className="hf-wa-title">
+              <strong>{selectedConversation.guest_name || "Ospite"}</strong>
+              <span>{selectedConversation.guest_phone}</span>
+            </div>
+            <span className="hf-wa-menu">⋮</span>
+          </header>
+
+          <div className="hf-wa-feed" ref={chatFeedRef}>
             {selectedConversationMessages.length ? selectedConversationMessages.map((m) => {
               const inbound = String(m.direction || "").toLowerCase() !== "outbound";
-              const bubbleStyle = {
-                maxWidth: "78%",
-                margin: inbound ? "8px auto 8px 0" : "8px 0 8px auto",
-                padding: "10px 12px",
-                borderRadius: inbound ? "14px 14px 14px 4px" : "14px 14px 4px 14px",
-                background: inbound ? "#202c33" : "#005c4b",
-                border: "1px solid rgba(255,255,255,.08)",
-                whiteSpace: "pre-wrap",
-              };
-              return <div key={m.id || `${m.created_at}-${m.message_text}`} style={bubbleStyle}>
-                <div style={{ fontSize: 12, opacity: .75, marginBottom: 4 }}>{inbound ? "Ospite" : "HostFlow"}</div>
-                <div>{m.message_text}</div>
-                <div style={{ fontSize: 11, opacity: .65, textAlign: "right", marginTop: 6 }}>{m.created_at ? new Date(m.created_at).toLocaleString("it-IT") : ""}</div>
-              </div>;
-            }) : <div className="hf-info">Nessun messaggio visibile in questa conversazione. I vecchi invii falliti sono stati nascosti.</div>}
+              return (
+                <div key={m.id || `${m.created_at}-${m.message_text}`} className={`hf-wa-bubble ${inbound ? "inbound" : "outbound"}`}>
+                  <div className="hf-wa-text">{m.message_text}</div>
+                  <div className="hf-wa-time">
+                    {m.created_at ? new Date(m.created_at).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }) : ""}
+                    {!inbound && <span> ✓✓</span>}
+                  </div>
+                </div>
+              );
+            }) : <div className="hf-wa-empty-chat">Nessun messaggio in questa conversazione.</div>}
           </div>
-          <div className="hf-whatsapp-reply">
-            <label>Rispondi dal numero business</label>
-            <textarea value={chatReply} onChange={e => setChatReply(e.target.value)} placeholder="Scrivi una risposta WhatsApp..." />
-            <button type="button" className="hf-primary-full" onClick={sendChatReply} disabled={chatSending || !chatReply.trim()}>{chatSending ? "Invio..." : "Invia risposta WhatsApp"}</button>
-            {chatMsg && <div className={chatMsg.toLowerCase().includes("erro") || chatMsg.toLowerCase().includes("fall") ? "hf-info" : "hf-success"}>{chatMsg}</div>}
-          </div>
-        </div> : <div className="hf-info">Seleziona una conversazione.</div>}
-      </div>
+
+          <footer className="hf-wa-compose">
+            <button type="button" className="hf-wa-plus">＋</button>
+            <textarea
+              value={chatReply}
+              onChange={e => setChatReply(e.target.value)}
+              placeholder="Scrivi un messaggio"
+              onKeyDown={e => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendChatReply();
+                }
+              }}
+            />
+            <button type="button" className="hf-wa-send" onClick={sendChatReply} disabled={chatSending || !chatReply.trim()}>
+              {chatSending ? "…" : "➤"}
+            </button>
+          </footer>
+          {chatMsg && <div className={chatMsg.toLowerCase().includes("erro") || chatMsg.toLowerCase().includes("fall") ? "hf-info" : "hf-success"}>{chatMsg}</div>}
+        </> : <div className="hf-wa-empty-chat">Seleziona una conversazione.</div>}
+      </section>
     </div>
   </>;
 }
