@@ -615,14 +615,7 @@ function MessagesTab({ token, property, rows }) {
           <input value={chatSearch} onChange={e => setChatSearch(e.target.value)} placeholder="Cerca o avvia una nuova chat" />
         </div>
 
-        <div className="hf-wa-filters">
-          <button type="button" className="active">Tutte</button>
-          <button type="button">Da leggere</button>
-          <button type="button">Preferiti</button>
-          <button type="button">Gruppi</button>
-        </div>
-
-        <div className="hf-wa-list">
+<div className="hf-wa-list">
           {filteredConversations.length ? filteredConversations.map((c) => {
             const messages = visibleChatMessages(c);
             const last = messages[messages.length - 1] || {};
@@ -740,7 +733,155 @@ function MessagesTab({ token, property, rows }) {
 .hf-wa-empty, .hf-wa-empty-chat { color:#aebac1 !important; padding:22px !important; }
 .hf-wa-empty-chat { margin:auto !important; }
 @media (max-width:980px) { .hf-wa-web { grid-template-columns:1fr !important; height:auto !important; } .hf-wa-left { height:350px !important; border-right:0 !important; border-bottom:1px solid rgba(255,255,255,.10) !important; } .hf-wa-right { height:650px !important; } }
-`}</style>
+`}
+
+/* Final WhatsApp inbox adjustments: desktop scroll + composer + mobile */
+.hf-wa-filters {
+  display: none !important;
+}
+
+.hf-wa-web {
+  height: min(78vh, 780px) !important;
+  min-height: 640px !important;
+  max-height: 780px !important;
+}
+
+.hf-wa-right {
+  height: 100% !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+
+.hf-wa-chat-top {
+  flex: 0 0 64px !important;
+}
+
+.hf-wa-messages {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  padding-bottom: 24px !important;
+}
+
+.hf-wa-composer {
+  flex: 0 0 auto !important;
+  position: sticky !important;
+  bottom: 0 !important;
+  z-index: 5 !important;
+  display: grid !important;
+}
+
+.hf-wa-composer textarea {
+  display: block !important;
+}
+
+.hf-wa-send {
+  display: grid !important;
+}
+
+@media (max-width: 980px) {
+  .hf-wa-web {
+    grid-template-columns: 1fr !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .hf-wa-left {
+    height: auto !important;
+    max-height: 360px !important;
+    min-height: 260px !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid rgba(255,255,255,.10) !important;
+  }
+
+  .hf-wa-list {
+    max-height: 230px !important;
+  }
+
+  .hf-wa-right {
+    height: 68vh !important;
+    min-height: 520px !important;
+    border-radius: 0 0 18px 18px !important;
+  }
+
+  .hf-wa-messages {
+    padding: 16px 12px !important;
+  }
+
+  .hf-wa-msg {
+    max-width: 86% !important;
+    font-size: 14px !important;
+  }
+
+  .hf-wa-composer {
+    grid-template-columns: 34px 1fr 42px !important;
+    gap: 8px !important;
+    padding: 9px !important;
+  }
+
+  .hf-wa-composer .hf-wa-round:nth-child(2) {
+    display: none !important;
+  }
+
+  .hf-wa-round {
+    width: 34px !important;
+  }
+
+  .hf-wa-composer textarea {
+    min-height: 42px !important;
+    font-size: 16px !important;
+  }
+
+  .hf-wa-send {
+    width: 42px !important;
+    height: 42px !important;
+  }
+}
+
+@media (max-width: 560px) {
+  .hf-wa-left-top,
+  .hf-wa-chat-top {
+    height: 58px !important;
+    padding: 0 12px !important;
+  }
+
+  .hf-wa-left-top h2 {
+    font-size: 19px !important;
+  }
+
+  .hf-wa-search {
+    margin: 8px 10px !important;
+  }
+
+  .hf-wa-row {
+    padding: 10px 8px !important;
+  }
+
+  .hf-wa-photo {
+    width: 42px !important;
+    height: 42px !important;
+  }
+
+  .hf-wa-right {
+    height: 70vh !important;
+    min-height: 500px !important;
+  }
+
+  .hf-wa-chat-icons {
+    gap: 10px !important;
+    font-size: 18px !important;
+  }
+
+  .hf-wa-msg {
+    max-width: 92% !important;
+  }
+}
+
+</style>
   </>;
 }
 function PulizieTab({ settings, rows, services, setServices }) {
