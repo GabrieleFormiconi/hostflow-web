@@ -343,7 +343,7 @@ function MessagesTab({ token, property, rows }) {
   const [statusOverrides, setStatusOverrides] = useState({});
   const [chatLoading, setChatLoading] = useState(false);
   const [conversations, setConversations] = useState([]);
-  const [selectedChatPhone, setSelectedChatPhone] = useState("");
+  const [selectedChatKey, setSelectedChatKey] = useState("");
   const [chatReply, setChatReply] = useState("");
   const [chatSending, setChatSending] = useState(false);
   const [chatMsg, setChatMsg] = useState("");
@@ -447,6 +447,17 @@ function MessagesTab({ token, property, rows }) {
   const failedCount = scheduledMessages.filter(m => m.status === "failed").length;
   const cancelledCount = scheduledMessages.filter(m => m.status === "cancelled").length;
 
+
+  function conversationKey(c, index = 0) {
+    return [
+      String(c?.guest_phone || "").trim(),
+      String(c?.booking_ref || "").trim(),
+      String(c?.guest_name || "").trim(),
+      String(c?.last_at || "").trim(),
+      String(index),
+    ].join("|");
+  }
+
   async function loadChat() {
     if (!token) return;
     setChatLoading(true);
@@ -456,7 +467,10 @@ function MessagesTab({ token, property, rows }) {
       if (!res.ok) throw new Error(data.error || data.message || "Errore caricamento chat.");
       const convs = Array.isArray(data.conversations) ? data.conversations : [];
       setConversations(convs);
-      if (!selectedChatPhone && convs[0]?.guest_phone) setSelectedChatPhone(convs[0].guest_phone);
+      setSelectedChatKey(prev => {
+        if (prev && convs.some((c, index) => conversationKey(c, index) === prev)) return prev;
+        return convs[0] ? conversationKey(convs[0], 0) : "";
+      });
     } catch (e) {
       setActionMsg(e.message || "Errore caricamento chat.");
     } finally {
@@ -558,18 +572,20 @@ function MessagesTab({ token, property, rows }) {
     }
   }
 
-  const selectedConversation = conversations.find(c => String(c.guest_phone) === String(selectedChatPhone)) || conversations[0];
+  const selectedConversation = conversations.find((c, index) => conversationKey(c, index) === selectedChatKey) || conversations[0];
   const selectedConversationMessages = visibleChatMessages(selectedConversation);
-  const filteredConversations = conversations.filter((c) => {
-    const q = String(chatSearch || "").trim().toLowerCase();
-    if (!q) return true;
-    return String(c.guest_name || "").toLowerCase().includes(q) || String(c.guest_phone || "").toLowerCase().includes(q);
-  });
+  const filteredConversations = conversations
+    .map((c, index) => ({ ...c, __chatKey: conversationKey(c, index) }))
+    .filter((c) => {
+      const q = String(chatSearch || "").trim().toLowerCase();
+      if (!q) return true;
+      return String(c.guest_name || "").toLowerCase().includes(q) || String(c.guest_phone || "").toLowerCase().includes(q);
+    });
 
   useEffect(() => {
     if (!chatFeedRef.current) return;
     chatFeedRef.current.scrollTop = chatFeedRef.current.scrollHeight;
-  }, [selectedChatPhone, selectedConversationMessages.length]);
+  }, [selectedChatKey, selectedConversationMessages.length]);
 
   return <>
     <h2>Messaggi automatici</h2>
@@ -666,10 +682,10 @@ function MessagesTab({ token, property, rows }) {
             const last = messages[messages.length - 1] || {};
             const lastText = last.message_text || c.last_message || "";
             const lastAt = last.created_at || c.last_at || "";
-            const active = selectedConversation?.guest_phone === c.guest_phone;
+            const active = selectedChatKey === c.__chatKey;
 
             return (
-              <button type="button" key={c.guest_phone} className={`hf-wa-client ${active ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}>
+              <button type="button" key={c.__chatKey} className={`hf-wa-client ${active ? "active" : ""}`} onClick={() => setSelectedChatKey(c.__chatKey)}>
                 <div className="hf-wa-avatar">{String(c.guest_name || "O").slice(0, 1).toUpperCase()}</div>
                 <div className="hf-wa-client-body">
                   <div className="hf-wa-client-top">
