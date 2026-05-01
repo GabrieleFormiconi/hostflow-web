@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://hostflow-backend.onrender.com";
@@ -590,159 +590,62 @@ function MessagesTab({ token, property, rows }) {
     <label className="hf-check hf-template-toggle"><input type="checkbox" checked={showTemplates} onChange={e => setShowTemplates(e.target.checked)} />Mostra template</label>
     {showTemplates && <div className="hf-form-box"><h3>Template messaggi</h3>{Object.entries(DEFAULT_SCHEDULES).map(([key, rule]) => <div key={key}><label>{rule.label}</label><textarea value={templates[key] || ""} onChange={e => updateTemplate(key, e.target.value)} /><div className="hf-grid-2"><label>Offset giorni<input type="number" value={schedules[key]?.offsetDays ?? 0} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], offsetDays: Number(e.target.value) } }))} /></label><label>Ora invio<input value={schedules[key]?.time || ""} onChange={e => setSchedules(prev => ({ ...prev, [key]: { ...prev[key], time: e.target.value } }))} /></label></div></div>)}<button type="button" className="hf-primary-full" onClick={saveTemplates}>Salva template messaggi</button>{msg && <div className="hf-success">{msg}</div>}</div>}
     <h2>Messaggi programmati</h2>
-    <p className="hf-muted">I messaggi programmati vengono aggiornati automaticamente dalle prenotazioni e dai template salvati.</p>
+    <div className="hf-actions"><button type="button" onClick={syncScheduledMessages} disabled={syncingSchedule || !scheduledMessages.length}>{syncingSchedule ? "Sincronizzo..." : "Genera / aggiorna messaggi programmati"}</button></div>
     <div className="hf-metrics"><Metric label="Da inviare" value={pendingCount} /><Metric label="Inviati" value={sentCount} /><Metric label="Falliti" value={failedCount} /><Metric label="Annullati" value={cancelledCount} /></div>
     <div className="hf-messages-layout"><div><h2>Prossimi messaggi</h2><p className="hf-muted">Lista essenziale, ordinata per soggiorno e data di invio.</p>{scheduledMessages.length ? <div className="hf-message-list">{scheduledMessages.map((m, index) => <button type="button" key={m.id} className={`hf-message-item status-${m.status} ${selected?.id === m.id ? "active" : ""} ${m.status === "cancelled" ? "cancelled" : ""}`} onClick={() => setSelectedId(m.id)}><span className="hf-message-dot">{selected?.id === m.id ? "●" : "○"}</span><span>#{index + 1} · {m.row.guest_name || "Ospite"} · {m.row.guest_phone} · {m.label} · {formatItalianDate(m.sendDate)}</span><small>{m.sendTime}</small></button>)}</div> : <div className="hf-info">Nessun messaggio programmato. Verranno mostrati solo ospiti con telefono e prenotazioni correnti o future.</div>}</div><div><h2>Dettaglio messaggio</h2>{selected ? <><div className={`hf-message-card ${selected.status === "cancelled" ? "cancelled" : ""}`}><div className={`hf-status-pill status-${selected.status}`}>{selected.status === "cancelled" ? "Annullato" : selected.status === "sent" ? "Inviato" : selected.status === "failed" ? "Fallito" : "In attesa di invio"}</div><h3>{selected.row.guest_name || "Ospite"}</h3><p>{selected.label} · whatsapp · Invio previsto: {formatItalianDate(selected.sendDate)} {selected.sendTime}</p></div><div className="hf-grid-2"><label>Telefono<input value={selected.row.guest_phone || ""} readOnly /></label><label>Piattaforma<input value={selected.row.platform || ""} readOnly /></label></div><label>Anteprima messaggio</label><textarea value={selected.text} readOnly className="hf-message-preview" />{selected.error_message && <div className="hf-info">Errore ultimo invio: {selected.error_message}</div>}<div className="hf-info">WhatsApp Cloud API configurata: puoi inviare subito questo messaggio dal numero business automatico.</div><div className="hf-actions"><button type="button" disabled={sending} onClick={sendSelected}>{sending ? "Invio..." : "Invia WhatsApp ora"}</button>{selected.status === "cancelled" ? <button type="button" onClick={restoreSelected}>Ripristina</button> : <button type="button" onClick={cancelSelected}>Annulla</button>}</div>{actionMsg && <div className={actionMsg.toLowerCase().includes("fall") || actionMsg.toLowerCase().includes("erro") ? "hf-info" : "hf-success"}>{actionMsg}</div>}</> : <div className="hf-info">Seleziona un messaggio dalla lista.</div>}</div></div>
 
-
-      <style jsx global>{`
-/* Final WhatsApp inbox adjustments: desktop scroll + composer + mobile */
-.hf-wa-filters {
-  display: none !important;
-}
-
-.hf-wa-web {
-  height: min(78vh, 780px) !important;
-  min-height: 640px !important;
-  max-height: 780px !important;
-}
-
-.hf-wa-right {
-  height: 100% !important;
-  min-height: 0 !important;
-  display: flex !important;
-  flex-direction: column !important;
-  overflow: hidden !important;
-}
-
-.hf-wa-chat-top {
-  flex: 0 0 64px !important;
-}
-
-.hf-wa-messages {
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-  overflow-y: auto !important;
-  padding-bottom: 24px !important;
-}
-
-.hf-wa-composer {
-  flex: 0 0 auto !important;
-  position: sticky !important;
-  bottom: 0 !important;
-  z-index: 5 !important;
-  display: grid !important;
-}
-
-.hf-wa-composer textarea {
-  display: block !important;
-}
-
-.hf-wa-send {
-  display: grid !important;
-}
-
-@media (max-width: 980px) {
-  .hf-wa-web {
-    grid-template-columns: 1fr !important;
-    height: auto !important;
-    min-height: 0 !important;
-    max-height: none !important;
-    overflow: visible !important;
-  }
-
-  .hf-wa-left {
-    height: auto !important;
-    max-height: 360px !important;
-    min-height: 260px !important;
-    border-right: 0 !important;
-    border-bottom: 1px solid rgba(255,255,255,.10) !important;
-  }
-
-  .hf-wa-list {
-    max-height: 230px !important;
-  }
-
-  .hf-wa-right {
-    height: 68vh !important;
-    min-height: 520px !important;
-    border-radius: 0 0 18px 18px !important;
-  }
-
-  .hf-wa-messages {
-    padding: 16px 12px !important;
-  }
-
-  .hf-wa-msg {
-    max-width: 86% !important;
-    font-size: 14px !important;
-  }
-
-  .hf-wa-composer {
-    grid-template-columns: 34px 1fr 42px !important;
-    gap: 8px !important;
-    padding: 9px !important;
-  }
-
-  .hf-wa-composer .hf-wa-round:nth-child(2) {
-    display: none !important;
-  }
-
-  .hf-wa-round {
-    width: 34px !important;
-  }
-
-  .hf-wa-composer textarea {
-    min-height: 42px !important;
-    font-size: 16px !important;
-  }
-
-  .hf-wa-send {
-    width: 42px !important;
-    height: 42px !important;
-  }
-}
-
-@media (max-width: 560px) {
-  .hf-wa-left-top,
-  .hf-wa-chat-top {
-    height: 58px !important;
-    padding: 0 12px !important;
-  }
-
-  .hf-wa-left-top h2 {
-    font-size: 19px !important;
-  }
-
-  .hf-wa-search {
-    margin: 8px 10px !important;
-  }
-
-  .hf-wa-row {
-    padding: 10px 8px !important;
-  }
-
-  .hf-wa-photo {
-    width: 42px !important;
-    height: 42px !important;
-  }
-
-  .hf-wa-right {
-    height: 70vh !important;
-    min-height: 500px !important;
-  }
-
-  .hf-wa-chat-icons {
-    gap: 10px !important;
-    font-size: 18px !important;
-  }
-
-  .hf-wa-msg {
-    max-width: 92% !important;
-  }
-}
-
-</style>
+    <h2>Inbox WhatsApp</h2>
+    <div className="hf-actions"><button type="button" onClick={loadChat} disabled={chatLoading}>{chatLoading ? "Aggiorno..." : "Aggiorna chat"}</button></div>
+    <div className="hf-messages-layout">
+      <div>
+        <h2>Conversazioni</h2>
+        {conversations.length ? <div className="hf-message-list">
+          {conversations.map((c) => {
+            const messages = visibleChatMessages(c);
+            const lastVisible = messages[messages.length - 1]?.message_text || c.last_message || "";
+            return <button type="button" key={c.guest_phone} className={`hf-message-item ${selectedConversation?.guest_phone === c.guest_phone ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}>
+              <span className="hf-message-dot">{selectedConversation?.guest_phone === c.guest_phone ? "●" : "○"}</span>
+              <span>{c.guest_name || "Ospite"} · {c.guest_phone}</span>
+              <small>{lastVisible}</small>
+            </button>;
+          })}
+        </div> : <div className="hf-info">Nessuna risposta ancora ricevuta. Scrivi dal telefono al numero test Meta, poi premi “Aggiorna chat”.</div>}
+      </div>
+      <div>
+        <h2>Chat</h2>
+        {selectedConversation ? <div className="hf-whatsapp-panel">
+          <div className="hf-whatsapp-header">
+            <strong>{selectedConversation.guest_name || "Ospite"}</strong>
+            <span>{selectedConversation.guest_phone}</span>
+          </div>
+          <div className="hf-whatsapp-feed">
+            {selectedConversationMessages.length ? selectedConversationMessages.map((m) => {
+              const inbound = String(m.direction || "").toLowerCase() !== "outbound";
+              const bubbleStyle = {
+                maxWidth: "78%",
+                margin: inbound ? "8px auto 8px 0" : "8px 0 8px auto",
+                padding: "10px 12px",
+                borderRadius: inbound ? "14px 14px 14px 4px" : "14px 14px 4px 14px",
+                background: inbound ? "#202c33" : "#005c4b",
+                border: "1px solid rgba(255,255,255,.08)",
+                whiteSpace: "pre-wrap",
+              };
+              return <div key={m.id || `${m.created_at}-${m.message_text}`} style={bubbleStyle}>
+                <div style={{ fontSize: 12, opacity: .75, marginBottom: 4 }}>{inbound ? "Ospite" : "HostFlow"}</div>
+                <div>{m.message_text}</div>
+                <div style={{ fontSize: 11, opacity: .65, textAlign: "right", marginTop: 6 }}>{m.created_at ? new Date(m.created_at).toLocaleString("it-IT") : ""}</div>
+              </div>;
+            }) : <div className="hf-info">Nessun messaggio visibile in questa conversazione. I vecchi invii falliti sono stati nascosti.</div>}
+          </div>
+          <div className="hf-whatsapp-reply">
+            <label>Rispondi dal numero business</label>
+            <textarea value={chatReply} onChange={e => setChatReply(e.target.value)} placeholder="Scrivi una risposta WhatsApp..." />
+            <button type="button" className="hf-primary-full" onClick={sendChatReply} disabled={chatSending || !chatReply.trim()}>{chatSending ? "Invio..." : "Invia risposta WhatsApp"}</button>
+            {chatMsg && <div className={chatMsg.toLowerCase().includes("erro") || chatMsg.toLowerCase().includes("fall") ? "hf-info" : "hf-success"}>{chatMsg}</div>}
+          </div>
+        </div> : <div className="hf-info">Seleziona una conversazione.</div>}
+      </div>
+    </div>
   </>;
 }
 function PulizieTab({ settings, rows, services, setServices }) {
@@ -923,7 +826,7 @@ function PulizieTab({ settings, rows, services, setServices }) {
 }
 function DatiTab({ rows }) { function downloadCsv() { const cols = TABLE_COLS; const csv = [cols.join(","), ...rows.map(r => cols.map(c => JSON.stringify(r[c] ?? "")).join(","))].join("\n"); const blob = new Blob([csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "hostflow_export.csv"; a.click(); URL.revokeObjectURL(url); } return <><h2>Scarica CSV elaborato</h2><button type="button" className="hf-primary-full" onClick={downloadCsv}>Scarica CSV</button><h2>Colonne calcolate</h2><div className="hf-table-wrap"><table><tbody>{TABLE_COLS.map(c => <tr key={c}><td>{c}</td></tr>)}</tbody></table></div></>; }
 
-function DashboardPageContent() {
+export default function DashboardPage() {
   const router = useRouter(); const searchParams = useSearchParams(); const [token, setToken] = useState(""); const [user, setUser] = useState(null); const [tab, setTab] = useState("Dashboard"); const [refreshKey, setRefreshKey] = useState(0); const [sidebarWidth, setSidebarWidth] = useState(370); const [baseRows, setBaseRows] = useState([]); const [customRows, setCustomRows] = useState([]); const [optimisticCustomRows, setOptimisticCustomRows] = useState([]); const [settings, setSettings] = useState(DEFAULT_SETTINGS); const [property, setProperty] = useState(DEFAULT_PROPERTY); const [cleaningServices, setCleaningServices] = useState([]); const [sidebarCollapsed, setSidebarCollapsed] = useState(false); const [onboarding, setOnboarding] = useState(false);
   useEffect(() => { const t = localStorage.getItem("hostflow_token"); const u = localStorage.getItem("hostflow_user"); if (!t) { router.push("/"); return; } setToken(t); if (u) setUser(JSON.parse(u)); setSettings(readJson(STORAGE.settings, DEFAULT_SETTINGS)); setProperty(readJson(STORAGE.property, DEFAULT_PROPERTY)); setCleaningServices(readArray(STORAGE.cleaningServices)); setSidebarCollapsed(localStorage.getItem(STORAGE.sidebar) === "1"); const needs = localStorage.getItem("hostflow_needs_onboarding") === "1" || searchParams.get("onboarding") === "1"; setOnboarding(needs); if (needs) setTab("Immobile"); }, [router, searchParams]);
   useEffect(() => { if (token) writeJson(STORAGE.settings, settings); }, [settings, token]);
@@ -933,155 +836,4 @@ function DashboardPageContent() {
   const mergedCustomRows = useMemo(() => mergeCustomRows(customRows, optimisticCustomRows), [customRows, optimisticCustomRows]); const rawRows = useMemo(() => [...baseRows, ...mergedCustomRows], [baseRows, mergedCustomRows]); const enrichedRows = useMemo(() => rawRows.map(r => enrichRow(r, settings, rawRows, cleaningServices)), [rawRows, settings, cleaningServices]); const filteredRows = useMemo(() => enrichedRows.filter(r => rowInPeriod(r, settings)), [enrichedRows, settings]); const [, , periodLabel] = periodRange(settings);
   if (!token) return <main className="hf-loading">Caricamento...</main>;
   return <main className={`hf-app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}><Sidebar token={token} settings={settings} setSettings={setSettings} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} sidebarWidth={sidebarWidth} setSidebarWidth={setSidebarWidth} onLogout={logout} onUploaded={() => setRefreshKey(x => x + 1)} /><section className="hf-main"><header><div><h1>HostFlow v5</h1><p>Dashboard host con import Booking, netto reale, immobile, analisi mercato e pricing regolabile</p></div></header><nav className="hf-tabs">{MAIN_TABS.map(t => <button type="button" key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{t}</button>)}</nav>{tab === "Dashboard" && <DashboardTab token={token} rows={filteredRows} allRows={enrichedRows} customRows={mergedCustomRows} refresh={() => setRefreshKey(x => x + 1)} settings={settings} periodLabel={periodLabel} onCustomCreated={(row) => setOptimisticCustomRows(prev => mergeCustomRows(prev, [row]))} />}{tab === "Immobile" && <ImmobileTab property={property} setProperty={setProperty} onboarding={onboarding} setOnboarding={setOnboarding} />}{tab === "Analisi mercato" && <MarketTab property={property} />}{tab === "Pricing" && <PricingTab rows={filteredRows} settings={settings} />}{tab === "Messaggi" && <MessagesTab token={token} property={property} rows={filteredRows} />}{tab === "Pulizie" && <PulizieTab settings={settings} rows={filteredRows} services={cleaningServices} setServices={setCleaningServices} />}{tab === "Dati" && <DatiTab rows={filteredRows} />}</section></main>;
-}
-      `}</style>
-
-    <h2>Inbox WhatsApp</h2>
-    <p className="hf-muted">Stile WhatsApp Web: scegli un cliente a sinistra e gestisci la conversazione a destra.</p>
-
-    <div className="hf-wa-web">
-      <aside className="hf-wa-left">
-        <div className="hf-wa-left-top">
-          <div>
-            <h2>Chat</h2>
-            <span>{chatLoading ? "Aggiornamento..." : "Online"}</span>
-          </div>
-          <div className="hf-wa-left-icons">
-            <span>＋</span>
-            <span>⋮</span>
-          </div>
-        </div>
-
-        <div className="hf-wa-search">
-          <span>⌕</span>
-          <input value={chatSearch} onChange={e => setChatSearch(e.target.value)} placeholder="Cerca o avvia una nuova chat" />
-        </div>
-
-<div className="hf-wa-list">
-          {filteredConversations.length ? filteredConversations.map((c) => {
-            const messages = visibleChatMessages(c);
-            const last = messages[messages.length - 1] || {};
-            const lastVisible = last.message_text || c.last_message || "";
-            const lastAt = last.created_at || c.last_at || "";
-            const active = selectedConversation?.guest_phone === c.guest_phone;
-            return <button type="button" key={c.guest_phone} className={`hf-wa-row ${active ? "active" : ""}`} onClick={() => setSelectedChatPhone(c.guest_phone)}>
-              <div className="hf-wa-photo">{String(c.guest_name || "O").slice(0, 1).toUpperCase()}</div>
-              <div className="hf-wa-row-body">
-                <div className="hf-wa-row-top">
-                  <strong>{c.guest_name || "Ospite"}</strong>
-                  <time>{lastAt ? new Date(lastAt).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }) : ""}</time>
-                </div>
-                <div className="hf-wa-row-bottom">
-                  <span>{String(last.direction || "").toLowerCase() === "outbound" ? "✓✓ " : ""}{lastVisible || "Nessun messaggio"}</span>
-                </div>
-              </div>
-            </button>;
-          }) : <div className="hf-wa-empty">Nessuna conversazione trovata.</div>}
-        </div>
-      </aside>
-
-      <section className="hf-wa-right">
-        {selectedConversation ? <>
-          <header className="hf-wa-chat-top">
-            <div className="hf-wa-photo">{String(selectedConversation.guest_name || "O").slice(0, 1).toUpperCase()}</div>
-            <div className="hf-wa-chat-title">
-              <strong>{selectedConversation.guest_name || "Ospite"}</strong>
-              <span>{selectedConversation.guest_phone}</span>
-            </div>
-            <div className="hf-wa-chat-icons">
-              <span>▱</span>
-              <span>⌕</span>
-              <span>⋮</span>
-            </div>
-          </header>
-
-          <div className="hf-wa-messages" ref={chatFeedRef}>
-            {selectedConversationMessages.length ? selectedConversationMessages.map((m) => {
-              const inbound = String(m.direction || "").toLowerCase() !== "outbound";
-              return <div key={m.id || `${m.created_at}-${m.message_text}`} className={`hf-wa-msg ${inbound ? "inbound" : "outbound"}`}>
-                <div className="hf-wa-msg-text">{m.message_text}</div>
-                <div className="hf-wa-msg-meta">
-                  {m.created_at ? new Date(m.created_at).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }) : ""}
-                  {!inbound && <span> ✓✓</span>}
-                </div>
-              </div>;
-            }) : <div className="hf-wa-empty-chat">Nessun messaggio in questa conversazione.</div>}
-          </div>
-
-          <footer className="hf-wa-composer">
-            <button type="button" className="hf-wa-round">＋</button>
-            <button type="button" className="hf-wa-round">☻</button>
-            <textarea value={chatReply} onChange={e => setChatReply(e.target.value)} placeholder="Scrivi un messaggio" onKeyDown={e => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                sendChatReply();
-              }
-            }} />
-            <button type="button" className="hf-wa-send" onClick={sendChatReply} disabled={chatSending || !chatReply.trim()}>{chatSending ? "…" : "➤"}</button>
-          </footer>
-          {chatMsg && <div className={chatMsg.toLowerCase().includes("erro") || chatMsg.toLowerCase().includes("fall") ? "hf-info" : "hf-success"}>{chatMsg}</div>}
-        </> : <div className="hf-wa-empty-chat">Seleziona una conversazione.</div>}
-      </section>
-    </div>
-
-<style jsx global>{`
-.hf-wa-web {
-  display: grid !important;
-  grid-template-columns: 360px minmax(520px, 1fr) !important;
-  height: min(78vh, 780px) !important;
-  min-height: 640px !important;
-  border: 1px solid rgba(255,255,255,.10) !important;
-  border-radius: 18px !important;
-  overflow: hidden !important;
-  background: #0b1118 !important;
-  box-shadow: 0 18px 50px rgba(0,0,0,.28) !important;
-}
-.hf-wa-left { background:#111b21 !important; border-right:1px solid rgba(255,255,255,.10) !important; display:flex !important; flex-direction:column !important; min-width:0 !important; }
-.hf-wa-left-top { height:64px !important; padding:0 16px !important; background:#202c33 !important; display:flex !important; align-items:center !important; justify-content:space-between !important; }
-.hf-wa-left-top h2 { margin:0 !important; font-size:22px !important; }
-.hf-wa-left-top span { color:#aebac1 !important; font-size:12px !important; }
-.hf-wa-left-icons, .hf-wa-chat-icons { display:flex !important; align-items:center !important; gap:18px !important; color:#d1d7db !important; font-size:22px !important; }
-.hf-wa-search { margin:10px 12px 8px !important; height:42px !important; border-radius:22px !important; background:#202c33 !important; display:flex !important; align-items:center !important; gap:8px !important; padding:0 14px !important; color:#8696a0 !important; }
-.hf-wa-search input { border:0 !important; outline:0 !important; background:transparent !important; color:#e9edef !important; width:100% !important; padding:0 !important; margin:0 !important; box-shadow:none !important; }
-.hf-wa-filters { display:flex !important; flex-wrap:wrap !important; gap:8px !important; padding:0 12px 10px !important; }
-.hf-wa-filters button { border:1px solid rgba(255,255,255,.08) !important; background:#202c33 !important; color:#d1d7db !important; padding:7px 11px !important; border-radius:18px !important; font-size:13px !important; width:auto !important; }
-.hf-wa-filters button.active { background:#0a332c !important; color:#7fffd4 !important; }
-.hf-wa-list { flex:1 !important; overflow-y:auto !important; padding:2px 8px 10px !important; }
-.hf-wa-row { width:100% !important; border:0 !important; background:transparent !important; color:#e9edef !important; display:flex !important; gap:12px !important; padding:11px 10px !important; border-radius:12px !important; cursor:pointer !important; text-align:left !important; }
-.hf-wa-row:hover, .hf-wa-row.active { background:#2a3942 !important; }
-.hf-wa-photo { width:48px !important; height:48px !important; border-radius:999px !important; background:linear-gradient(135deg, rgba(37,99,235,.9), rgba(5,150,105,.9)), #263238 !important; display:grid !important; place-items:center !important; color:white !important; font-weight:800 !important; flex:0 0 auto !important; overflow:hidden !important; }
-.hf-wa-row-body { min-width:0 !important; flex:1 !important; padding-bottom:10px !important; border-bottom:1px solid rgba(255,255,255,.05) !important; }
-.hf-wa-row-top { display:flex !important; justify-content:space-between !important; gap:12px !important; line-height:1.2 !important; }
-.hf-wa-row-top strong { font-size:15px !important; overflow:hidden !important; white-space:nowrap !important; text-overflow:ellipsis !important; }
-.hf-wa-row-top time { color:#aebac1 !important; font-size:12px !important; flex:0 0 auto !important; }
-.hf-wa-row-bottom { margin-top:5px !important; color:#aebac1 !important; font-size:14px !important; overflow:hidden !important; white-space:nowrap !important; text-overflow:ellipsis !important; }
-.hf-wa-right { min-width:0 !important; display:flex !important; flex-direction:column !important; background:linear-gradient(rgba(11,20,26,.90), rgba(11,20,26,.90)), radial-gradient(circle at 15% 20%, rgba(255,255,255,.08) 0 1px, transparent 2px), radial-gradient(circle at 80% 30%, rgba(255,255,255,.06) 0 1px, transparent 2px), radial-gradient(circle at 35% 75%, rgba(255,255,255,.05) 0 1px, transparent 2px), #0b141a !important; background-size:auto,46px 46px,58px 58px,64px 64px !important; height:100% !important; }
-.hf-wa-chat-top { height:64px !important; background:#202c33 !important; display:flex !important; align-items:center !important; gap:12px !important; padding:0 16px !important; border-bottom:1px solid rgba(255,255,255,.08) !important; }
-.hf-wa-chat-title { flex:1 !important; min-width:0 !important; }
-.hf-wa-chat-title strong { display:block !important; color:#e9edef !important; font-size:16px !important; }
-.hf-wa-chat-title span { display:block !important; color:#aebac1 !important; font-size:13px !important; margin-top:2px !important; }
-.hf-wa-messages { flex:1 !important; overflow-y:auto !important; padding:22px 7% !important; display:flex !important; flex-direction:column !important; scroll-behavior:smooth !important; }
-.hf-wa-msg { position:relative !important; max-width:min(650px,72%) !important; padding:8px 10px 6px !important; border-radius:8px !important; margin:3px 0 !important; color:#e9edef !important; box-shadow:0 1px 1px rgba(0,0,0,.22) !important; white-space:pre-wrap !important; line-height:1.38 !important; font-size:15px !important; }
-.hf-wa-msg.inbound { align-self:flex-start !important; background:#202c33 !important; border-top-left-radius:0 !important; }
-.hf-wa-msg.outbound { align-self:flex-end !important; background:#005c4b !important; border-top-right-radius:0 !important; }
-.hf-wa-msg-text { padding-right:54px !important; }
-.hf-wa-msg-meta { float:right !important; margin-left:10px !important; margin-top:3px !important; color:rgba(233,237,239,.62) !important; font-size:11px !important; line-height:1 !important; }
-.hf-wa-msg-meta span { color:#53bdeb !important; }
-.hf-wa-composer { min-height:66px !important; background:#202c33 !important; display:grid !important; grid-template-columns:40px 40px 1fr 46px !important; align-items:end !important; gap:8px !important; padding:10px 14px !important; }
-.hf-wa-round, .hf-wa-send { border:0 !important; width:40px !important; height:44px !important; border-radius:999px !important; background:transparent !important; color:#aebac1 !important; font-size:23px !important; display:grid !important; place-items:center !important; padding:0 !important; }
-.hf-wa-send { background:#00a884 !important; color:white !important; font-size:18px !important; }
-.hf-wa-send:disabled { background:transparent !important; color:#aebac1 !important; opacity:.7 !important; }
-.hf-wa-composer textarea { min-height:44px !important; max-height:115px !important; border:0 !important; border-radius:22px !important; background:#2a3942 !important; color:#e9edef !important; padding:12px 16px !important; margin:0 !important; resize:none !important; outline:none !important; }
-.hf-wa-empty, .hf-wa-empty-chat { color:#aebac1 !important; padding:22px !important; }
-.hf-wa-empty-chat { margin:auto !important; }
-@media (max-width:980px) { .hf-wa-web { grid-template-columns:1fr !important; height:auto !important; } .hf-wa-left { height:350px !important; border-right:0 !important; border-bottom:1px solid rgba(255,255,255,.10) !important; } .hf-wa-right { height:650px !important; } }
-`}
-
-
-export default function DashboardPage() {
-  return (
-    <Suspense fallback={<main className="hf-loading">Caricamento...</main>}>
-      <DashboardPageContent />
-    </Suspense>
-  );
 }
