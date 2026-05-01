@@ -688,6 +688,59 @@ function MessagesTab({ token, property, rows }) {
         </> : <div className="hf-wa-empty-chat">Seleziona una conversazione.</div>}
       </section>
     </div>
+
+<style jsx global>{`
+.hf-wa-web {
+  display: grid !important;
+  grid-template-columns: 360px minmax(520px, 1fr) !important;
+  height: min(78vh, 780px) !important;
+  min-height: 640px !important;
+  border: 1px solid rgba(255,255,255,.10) !important;
+  border-radius: 18px !important;
+  overflow: hidden !important;
+  background: #0b1118 !important;
+  box-shadow: 0 18px 50px rgba(0,0,0,.28) !important;
+}
+.hf-wa-left { background:#111b21 !important; border-right:1px solid rgba(255,255,255,.10) !important; display:flex !important; flex-direction:column !important; min-width:0 !important; }
+.hf-wa-left-top { height:64px !important; padding:0 16px !important; background:#202c33 !important; display:flex !important; align-items:center !important; justify-content:space-between !important; }
+.hf-wa-left-top h2 { margin:0 !important; font-size:22px !important; }
+.hf-wa-left-top span { color:#aebac1 !important; font-size:12px !important; }
+.hf-wa-left-icons, .hf-wa-chat-icons { display:flex !important; align-items:center !important; gap:18px !important; color:#d1d7db !important; font-size:22px !important; }
+.hf-wa-search { margin:10px 12px 8px !important; height:42px !important; border-radius:22px !important; background:#202c33 !important; display:flex !important; align-items:center !important; gap:8px !important; padding:0 14px !important; color:#8696a0 !important; }
+.hf-wa-search input { border:0 !important; outline:0 !important; background:transparent !important; color:#e9edef !important; width:100% !important; padding:0 !important; margin:0 !important; box-shadow:none !important; }
+.hf-wa-filters { display:flex !important; flex-wrap:wrap !important; gap:8px !important; padding:0 12px 10px !important; }
+.hf-wa-filters button { border:1px solid rgba(255,255,255,.08) !important; background:#202c33 !important; color:#d1d7db !important; padding:7px 11px !important; border-radius:18px !important; font-size:13px !important; width:auto !important; }
+.hf-wa-filters button.active { background:#0a332c !important; color:#7fffd4 !important; }
+.hf-wa-list { flex:1 !important; overflow-y:auto !important; padding:2px 8px 10px !important; }
+.hf-wa-row { width:100% !important; border:0 !important; background:transparent !important; color:#e9edef !important; display:flex !important; gap:12px !important; padding:11px 10px !important; border-radius:12px !important; cursor:pointer !important; text-align:left !important; }
+.hf-wa-row:hover, .hf-wa-row.active { background:#2a3942 !important; }
+.hf-wa-photo { width:48px !important; height:48px !important; border-radius:999px !important; background:linear-gradient(135deg, rgba(37,99,235,.9), rgba(5,150,105,.9)), #263238 !important; display:grid !important; place-items:center !important; color:white !important; font-weight:800 !important; flex:0 0 auto !important; overflow:hidden !important; }
+.hf-wa-row-body { min-width:0 !important; flex:1 !important; padding-bottom:10px !important; border-bottom:1px solid rgba(255,255,255,.05) !important; }
+.hf-wa-row-top { display:flex !important; justify-content:space-between !important; gap:12px !important; line-height:1.2 !important; }
+.hf-wa-row-top strong { font-size:15px !important; overflow:hidden !important; white-space:nowrap !important; text-overflow:ellipsis !important; }
+.hf-wa-row-top time { color:#aebac1 !important; font-size:12px !important; flex:0 0 auto !important; }
+.hf-wa-row-bottom { margin-top:5px !important; color:#aebac1 !important; font-size:14px !important; overflow:hidden !important; white-space:nowrap !important; text-overflow:ellipsis !important; }
+.hf-wa-right { min-width:0 !important; display:flex !important; flex-direction:column !important; background:linear-gradient(rgba(11,20,26,.90), rgba(11,20,26,.90)), radial-gradient(circle at 15% 20%, rgba(255,255,255,.08) 0 1px, transparent 2px), radial-gradient(circle at 80% 30%, rgba(255,255,255,.06) 0 1px, transparent 2px), radial-gradient(circle at 35% 75%, rgba(255,255,255,.05) 0 1px, transparent 2px), #0b141a !important; background-size:auto,46px 46px,58px 58px,64px 64px !important; height:100% !important; }
+.hf-wa-chat-top { height:64px !important; background:#202c33 !important; display:flex !important; align-items:center !important; gap:12px !important; padding:0 16px !important; border-bottom:1px solid rgba(255,255,255,.08) !important; }
+.hf-wa-chat-title { flex:1 !important; min-width:0 !important; }
+.hf-wa-chat-title strong { display:block !important; color:#e9edef !important; font-size:16px !important; }
+.hf-wa-chat-title span { display:block !important; color:#aebac1 !important; font-size:13px !important; margin-top:2px !important; }
+.hf-wa-messages { flex:1 !important; overflow-y:auto !important; padding:22px 7% !important; display:flex !important; flex-direction:column !important; scroll-behavior:smooth !important; }
+.hf-wa-msg { position:relative !important; max-width:min(650px,72%) !important; padding:8px 10px 6px !important; border-radius:8px !important; margin:3px 0 !important; color:#e9edef !important; box-shadow:0 1px 1px rgba(0,0,0,.22) !important; white-space:pre-wrap !important; line-height:1.38 !important; font-size:15px !important; }
+.hf-wa-msg.inbound { align-self:flex-start !important; background:#202c33 !important; border-top-left-radius:0 !important; }
+.hf-wa-msg.outbound { align-self:flex-end !important; background:#005c4b !important; border-top-right-radius:0 !important; }
+.hf-wa-msg-text { padding-right:54px !important; }
+.hf-wa-msg-meta { float:right !important; margin-left:10px !important; margin-top:3px !important; color:rgba(233,237,239,.62) !important; font-size:11px !important; line-height:1 !important; }
+.hf-wa-msg-meta span { color:#53bdeb !important; }
+.hf-wa-composer { min-height:66px !important; background:#202c33 !important; display:grid !important; grid-template-columns:40px 40px 1fr 46px !important; align-items:end !important; gap:8px !important; padding:10px 14px !important; }
+.hf-wa-round, .hf-wa-send { border:0 !important; width:40px !important; height:44px !important; border-radius:999px !important; background:transparent !important; color:#aebac1 !important; font-size:23px !important; display:grid !important; place-items:center !important; padding:0 !important; }
+.hf-wa-send { background:#00a884 !important; color:white !important; font-size:18px !important; }
+.hf-wa-send:disabled { background:transparent !important; color:#aebac1 !important; opacity:.7 !important; }
+.hf-wa-composer textarea { min-height:44px !important; max-height:115px !important; border:0 !important; border-radius:22px !important; background:#2a3942 !important; color:#e9edef !important; padding:12px 16px !important; margin:0 !important; resize:none !important; outline:none !important; }
+.hf-wa-empty, .hf-wa-empty-chat { color:#aebac1 !important; padding:22px !important; }
+.hf-wa-empty-chat { margin:auto !important; }
+@media (max-width:980px) { .hf-wa-web { grid-template-columns:1fr !important; height:auto !important; } .hf-wa-left { height:350px !important; border-right:0 !important; border-bottom:1px solid rgba(255,255,255,.10) !important; } .hf-wa-right { height:650px !important; } }
+`}</style>
   </>;
 }
 function PulizieTab({ settings, rows, services, setServices }) {
