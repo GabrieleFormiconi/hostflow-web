@@ -448,6 +448,19 @@ function MessagesTab({ token, property, rows }) {
   const cancelledCount = scheduledMessages.filter(m => m.status === "cancelled").length;
 
 
+
+  function normalizePhoneForMatch(value) {
+    return String(value || "").replace(/\D/g, "");
+  }
+
+  const reservationPhoneSet = useMemo(() => {
+    const phones = rows
+      .map(r => normalizePhoneForMatch(r.guest_phone))
+      .filter(Boolean);
+
+    return new Set(phones);
+  }, [rows]);
+
   function conversationKey(c, index = 0) {
     return [
       String(c?.guest_phone || "").trim(),
@@ -467,10 +480,6 @@ function MessagesTab({ token, property, rows }) {
       if (!res.ok) throw new Error(data.error || data.message || "Errore caricamento chat.");
       const convs = Array.isArray(data.conversations) ? data.conversations : [];
       setConversations(convs);
-      setSelectedChatKey(prev => {
-        if (prev && convs.some((c, index) => conversationKey(c, index) === prev)) return prev;
-        return convs[0] ? conversationKey(convs[0], 0) : "";
-      });
     } catch (e) {
       setActionMsg(e.message || "Errore caricamento chat.");
     } finally {
@@ -572,15 +581,37 @@ function MessagesTab({ token, property, rows }) {
     }
   }
 
-  const selectedConversation = conversations.find((c, index) => conversationKey(c, index) === selectedChatKey) || conversations[0];
+  const visibleConversations = useMemo(() => {
+    return conversations
+      .map((c, index) => ({ ...c, __chatKey: conversationKey(c, index) }))
+      .filter((c) => {
+        const phone = normalizePhoneForMatch(c.guest_phone);
+        return phone && reservationPhoneSet.has(phone);
+      });
+  }, [conversations, reservationPhoneSet]);
+
+  const selectedConversation =
+    visibleConversations.find(c => c.__chatKey === selectedChatKey) ||
+    visibleConversations[0];
+
   const selectedConversationMessages = visibleChatMessages(selectedConversation);
-  const filteredConversations = conversations
-    .map((c, index) => ({ ...c, __chatKey: conversationKey(c, index) }))
-    .filter((c) => {
-      const q = String(chatSearch || "").trim().toLowerCase();
-      if (!q) return true;
-      return String(c.guest_name || "").toLowerCase().includes(q) || String(c.guest_phone || "").toLowerCase().includes(q);
-    });
+
+  const filteredConversations = visibleConversations.filter((c) => {
+    const q = String(chatSearch || "").trim().toLowerCase();
+    if (!q) return true;
+    return String(c.guest_name || "").toLowerCase().includes(q) || String(c.guest_phone || "").toLowerCase().includes(q);
+  });
+
+  useEffect(() => {
+    if (!visibleConversations.length) {
+      setSelectedChatKey("");
+      return;
+    }
+
+    if (!selectedChatKey || !visibleConversations.some(c => c.__chatKey === selectedChatKey)) {
+      setSelectedChatKey(visibleConversations[0].__chatKey);
+    }
+  }, [visibleConversations, selectedChatKey]);
 
   useEffect(() => {
     if (!chatFeedRef.current) return;
@@ -699,7 +730,7 @@ function MessagesTab({ token, property, rows }) {
                 </div>
               </button>
             );
-          }) : <div className="hf-wa-empty">Nessuna conversazione trovata.</div>}
+          }) : <div className="hf-wa-empty">Nessuna conversazione collegata alle prenotazioni visibili in Dashboard.</div>}
         </div>
       </aside>
 
