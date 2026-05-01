@@ -453,12 +453,25 @@ function MessagesTab({ token, property, rows }) {
     return String(value || "").replace(/\D/g, "");
   }
 
-  const reservationPhoneSet = useMemo(() => {
-    const phones = rows
+  function phoneMatches(a, b) {
+    const x = normalizePhoneForMatch(a);
+    const y = normalizePhoneForMatch(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    if (x.endsWith(y) || y.endsWith(x)) return true;
+
+    const x9 = x.slice(-9);
+    const y9 = y.slice(-9);
+    const x10 = x.slice(-10);
+    const y10 = y.slice(-10);
+
+    return (!!x9 && x9 === y9) || (!!x10 && x10 === y10);
+  }
+
+  const reservationPhones = useMemo(() => {
+    return rows
       .map(r => normalizePhoneForMatch(r.guest_phone))
       .filter(Boolean);
-
-    return new Set(phones);
   }, [rows]);
 
   function conversationKey(c, index = 0) {
@@ -586,9 +599,9 @@ function MessagesTab({ token, property, rows }) {
       .map((c, index) => ({ ...c, __chatKey: conversationKey(c, index) }))
       .filter((c) => {
         const phone = normalizePhoneForMatch(c.guest_phone);
-        return phone && reservationPhoneSet.has(phone);
+        return phone && reservationPhones.some(p => phoneMatches(phone, p));
       });
-  }, [conversations, reservationPhoneSet]);
+  }, [conversations, reservationPhones]);
 
   const selectedConversation =
     visibleConversations.find(c => c.__chatKey === selectedChatKey) ||
