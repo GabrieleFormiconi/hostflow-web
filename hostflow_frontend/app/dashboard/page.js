@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   vatPct: "22",
   withholding: true,
   withholdingPct: "21",
+  bookingCommissionPct: "15",
   periodMode: "Mensile",
   year: new Date().getFullYear(),
   month: new Date().getMonth() + 1,
@@ -183,12 +184,16 @@ function enrichRow(row, settings, allRows, cleaningServices = []) {
   const cancelled = isCancelled(row);
   const total = cancelled ? 0 : toNum(row.total_price);
   const cleaning = cleaningForRow({ ...row, nights: n }, settings, allRows || [], cleaningServices);
-  const platformFee = cancelled ? 0 : toNum(row.platform_fee);
+  const isCustom = String(row.platform || "").toLowerCase() === "custom";
+  const importedPlatformFee = toNum(row.platform_fee);
+  const platformFee = cancelled || isCustom ? 0 : (importedPlatformFee > 0 ? importedPlatformFee : total * toNum(settings.bookingCommissionPct || 15) / 100);
   const trx = cancelled ? 0 : (settings.transactionMode === "Percentuale" ? total * toNum(settings.transactionPct) / 100 : toNum(row.transaction_cost));
   const cityTax = cancelled || !settings.cityTax ? 0 : toNum(row.guests || 1) * n * toNum(settings.cityTaxRate);
-  const vat = cancelled ? 0 : platformFee * toNum(settings.vatPct) / 100;
+  const importedVat = toNum(row.vat_platform_services);
+  const vat = cancelled || isCustom ? 0 : (importedVat > 0 ? importedVat : platformFee * toNum(settings.vatPct) / 100);
+  const importedWithholding = toNum(row.withholding_tax);
+  const withholding = cancelled || !settings.withholding ? 0 : (importedWithholding > 0 ? importedWithholding : Math.max(0, total - cityTax) * toNum(settings.withholdingPct) / 100);
   const netOperating = cancelled ? 0 : total - cleaning - platformFee - trx - vat - cityTax;
-  const withholding = cancelled || !settings.withholding ? 0 : Math.max(0, total - cityTax) * toNum(settings.withholdingPct) / 100;
   const netReal = netOperating - withholding;
   return { ...row, nights: n, total_price: total, cleaning_cost: cleaning, transaction_cost: trx, city_tax: cityTax, vat_platform_services: vat, cleaning_allocated: cleaning, withholding_tax: withholding, net_operating: netOperating, net_real: netReal, adr: n ? total / n : 0 };
 }
@@ -204,6 +209,8 @@ function normalize(row, platformOverride) {
     cleaning_cost: toNum(row.cleaning_cost),
     platform_fee: toNum(row.platform_fee),
     transaction_cost: toNum(row.transaction_cost),
+    vat_platform_services: toNum(row.vat_platform_services),
+    withholding_tax: toNum(row.withholding_tax),
     status: row.status || row.raw_booking_status || "confirmed",
     guests: toNum(row.guests || 1),
     notes: row.notes || "",
@@ -270,7 +277,7 @@ function Sidebar({ token, onUploaded, settings, setSettings, collapsed, setColla
       <h2>Import</h2><label>Tipo import</label>{["Auto", "Booking export", "CSV standard"].map(m => <label className="hf-radio" key={m}><input type="radio" checked={settings.importMode === m} onChange={() => patch({ importMode: m })} />{m}</label>)}
       <label>Carica file prenotazioni</label><div className="hf-upload"><input ref={fileInput} hidden type="file" accept=".csv,.xls,.xlsx" onChange={e => uploadFile(e.target.files?.[0])} /><button type="button" onClick={() => fileInput.current?.click()} disabled={uploading}>↥ {uploading ? "Upload..." : "Upload"}</button><p>200MB per file • CSV, XLS, XLSX</p></div>{uploadText && <div className="hf-success">{uploadText}</div>}
       <SidebarSection title="Pulizie"><label>Modalità pulizie</label>{["Per prenotazione", "Mensile", "Ad ore"].map(m => <label className="hf-radio" key={m}><input type="radio" checked={settings.cleaningMode === m} onChange={() => patch({ cleaningMode: m })} />{m}</label>)}<label>Pulizie per prenotazione (€)</label><input value={settings.cleaningCost} onChange={e => patch({ cleaningCost: e.target.value })} /><label>Costo pulizie mensile (€)</label><input value={settings.monthlyCleaning} onChange={e => patch({ monthlyCleaning: e.target.value })} /><label>Tariffa oraria pulizie (€)</label><input value={settings.cleaningHourlyRate} onChange={e => patch({ cleaningHourlyRate: e.target.value })} /><label>Ore medie per prenotazione</label><input value={settings.cleaningHours} onChange={e => patch({ cleaningHours: e.target.value })} /></SidebarSection>
-      <SidebarSection title="Impostazioni finanziarie"><label className="hf-check"><input type="checkbox" checked={settings.cityTax} onChange={e => patch({ cityTax: e.target.checked })} />Includi tassa di soggiorno nel netto</label><label>Tassa soggiorno (€ per persona/notte)</label><input value={settings.cityTaxRate} onChange={e => patch({ cityTaxRate: e.target.value })} /><label>Costo transazione</label>{["Percentuale", "Dal file"].map(m => <label className="hf-radio" key={m}><input type="radio" checked={settings.transactionMode === m} onChange={() => patch({ transactionMode: m })} />{m}</label>)}<label>Costo transazione (%)</label><input value={settings.transactionPct} onChange={e => patch({ transactionPct: e.target.value })} /><label>VAT servizi piattaforma (%)</label><input value={settings.vatPct} onChange={e => patch({ vatPct: e.target.value })} /><label className="hf-check"><input type="checkbox" checked={settings.withholding} onChange={e => patch({ withholding: e.target.checked })} />Applica ritenuta locazione breve</label><label>Ritenuta locazione breve (%)</label><input value={settings.withholdingPct} onChange={e => patch({ withholdingPct: e.target.value })} /></SidebarSection>
+      <SidebarSection title="Impostazioni finanziarie"><label className="hf-check"><input type="checkbox" checked={settings.cityTax} onChange={e => patch({ cityTax: e.target.checked })} />Includi tassa di soggiorno nel netto</label><label>Tassa soggiorno (€ per persona/notte)</label><input value={settings.cityTaxRate} onChange={e => patch({ cityTaxRate: e.target.value })} /><label>Costo transazione</label>{["Percentuale", "Dal file"].map(m => <label className="hf-radio" key={m}><input type="radio" checked={settings.transactionMode === m} onChange={() => patch({ transactionMode: m })} />{m}</label>)}<label>Costo transazione (%)</label><input value={settings.transactionPct} onChange={e => patch({ transactionPct: e.target.value })} /><label>Commissione Booking fallback (%)</label><input value={settings.bookingCommissionPct} onChange={e => patch({ bookingCommissionPct: e.target.value })} /><label>VAT servizi piattaforma (%)</label><input value={settings.vatPct} onChange={e => patch({ vatPct: e.target.value })} /><label className="hf-check"><input type="checkbox" checked={settings.withholding} onChange={e => patch({ withholding: e.target.checked })} />Applica ritenuta locazione breve</label><label>Ritenuta locazione breve (%)</label><input value={settings.withholdingPct} onChange={e => patch({ withholdingPct: e.target.value })} /></SidebarSection>
       <SidebarSection title="Periodo"><label>Vista periodo</label><select value={settings.periodMode} onChange={e => patch({ periodMode: e.target.value })}>{["Mensile", "Trimestrale", "Semestrale", "Annuale", "Personalizzato"].map(x => <option key={x}>{x}</option>)}</select><label>Anno dashboard</label><input value={settings.year} onChange={e => patch({ year: e.target.value })} />{settings.periodMode === "Mensile" && <><label>Mese dashboard</label><select value={settings.month} onChange={e => patch({ month: e.target.value })}>{Array.from({ length: 12 }, (_, i) => <option key={i + 1}>{i + 1}</option>)}</select></>}{settings.periodMode === "Trimestrale" && <><label>Trimestre</label><select value={settings.quarter} onChange={e => patch({ quarter: e.target.value })}><option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option></select></>}{settings.periodMode === "Semestrale" && <><label>Semestre</label><select value={settings.semester} onChange={e => patch({ semester: e.target.value })}><option value="1">H1</option><option value="2">H2</option></select></>}{settings.periodMode === "Personalizzato" && <><label>Da</label><input type="date" value={settings.customStart} onChange={e => patch({ customStart: e.target.value })} /><label>A</label><input type="date" value={settings.customEnd} onChange={e => patch({ customEnd: e.target.value })} /></>}</SidebarSection>
       <button type="button" className="hf-sidebar-logout" onClick={onLogout}>Esci</button>
     </>}
